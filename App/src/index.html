@@ -3,11 +3,12 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' https://api.openai.com https://api.anthropic.com https://*">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'">
   <title>Writing Partner</title>
   <link rel="stylesheet" href="styles/main.css">
   <link rel="stylesheet" href="styles/editor.css">
   <link rel="stylesheet" href="styles/agents.css">
+  <link rel="stylesheet" href="styles/partner.css">
 </head>
 <body class="theme-dark">
   
@@ -16,6 +17,7 @@
     <div class="titlebar-drag">
       <span class="app-title">Writing Partner</span>
       <span class="project-name" id="currentProjectName">Aucun projet</span>
+      <span class="doc-position" id="docPosition" aria-live="off"></span>
     </div>
   </div>
 
@@ -29,8 +31,14 @@
         <select id="projectSelect">
           <option value="">— Sélectionner un projet —</option>
         </select>
-        <button class="btn-icon" id="btnNewProject" title="Nouveau projet">+</button>
+        <button class="btn-icon" id="btnNewProject" title="Nouveau projet" aria-label="Nouveau projet">+</button>
       </div>
+
+      <!-- Documents du projet (fichiers .md du dossier) -->
+      <nav class="documents-nav hidden" id="documentsNav" aria-label="Documents du projet">
+        <div class="documents-header">Documents</div>
+        <ul class="documents-list" id="documentsList"></ul>
+      </nav>
       
       <!-- Onglets du projet (apparaît quand projet sélectionné) -->
       <div class="project-tabs hidden" id="projectTabs">
@@ -146,9 +154,11 @@
       <!-- Barre d'outils -->
       <div class="editor-toolbar">
         <div class="toolbar-group">
-          <button class="toolbar-btn editor-mode-btn active" data-mode="split" title="Vue double">⧉</button>
-          <button class="toolbar-btn editor-mode-btn" data-mode="notes" title="Notes seulement">📝</button>
-          <button class="toolbar-btn editor-mode-btn" data-mode="script" title="Scénario seulement">📜</button>
+          <button class="toolbar-btn toolbar-toggle" id="btnToggleNav" aria-pressed="true" title="Afficher / masquer la navigation">Navigation</button>
+          <div class="toolbar-separator"></div>
+          <button class="toolbar-btn editor-mode-btn active" data-mode="notes" title="Le document seul, au centre">Écrire</button>
+          <button class="toolbar-btn editor-mode-btn" data-mode="split" title="Le document et l'aperçu structuré côte à côte">Écrire + aperçu</button>
+          <button class="toolbar-btn editor-mode-btn" data-mode="script" title="L'aperçu structuré seul (scénario, fiches)">Aperçu</button>
         </div>
         <div class="toolbar-separator"></div>
         <div class="toolbar-group">
@@ -165,17 +175,20 @@
         <div class="toolbar-group">
           <span class="word-count" id="wordCount">0 mots</span>
         </div>
+        <div class="toolbar-group">
+          <button class="toolbar-btn toolbar-toggle" id="btnTogglePartner" aria-pressed="true" title="Afficher / masquer le partenaire (Ctrl+Maj+P)">Partenaire</button>
+        </div>
       </div>
       
       <!-- Double éditeur -->
-      <div class="dual-editor" id="dualEditor">
+      <div class="dual-editor mode-notes" id="dualEditor">
         <!-- Éditeur Notes (gauche) -->
         <div class="editor-pane" id="notesPane">
           <div class="pane-header">
-            <span class="pane-title">📝 Notes & Idées</span>
-            <span class="pane-hint">Écris ici tes idées à la volée (ex: "p45 héros crie en garde")</span>
+            <span class="pane-title" id="docTitle">Document</span>
+            <span class="pane-hint" id="docHint">Sélectionne un passage pour demander l'aide du partenaire sur ce passage précis.</span>
           </div>
-          <textarea class="editor" id="notesEditor" placeholder="Note tes idées ici...&#10;&#10;Exemples:&#10;- p45 héros fait demi-tour et crie &quot;en garde!&quot;&#10;- personnage: Marie a peur du noir&#10;- lieu: la grotte est humide et sombre&#10;- TODO: définir le motif du méchant"></textarea>
+          <textarea class="editor" id="notesEditor" aria-labelledby="docTitle" spellcheck="true" placeholder="Note tes idées ici...&#10;&#10;Exemples:&#10;- p45 héros fait demi-tour et crie &quot;en garde!&quot;&#10;- personnage: Marie a peur du noir&#10;- lieu: la grotte est humide et sombre&#10;- TODO: définir le motif du méchant"></textarea>
         </div>
         
         <!-- Séparateur redimensionnable -->
@@ -201,98 +214,59 @@
       </div>
     </main>
 
-    <!-- Sidebar droite - Agents IA -->
-    <aside class="sidebar sidebar-right" id="sidebarRight">
-      <div class="agents-header">
-        <h3>Agents</h3>
-        <button class="btn-icon" id="btnSettings" title="Paramètres">⚙</button>
-      </div>
-      
-      <div class="agents-list">
-        <button class="agent-btn active" data-agent="writing-partner">
-          <span class="agent-icon">✍️</span>
-          <span class="agent-name">Writing Partner</span>
-        </button>
-        <button class="agent-btn" data-agent="world-builder">
-          <span class="agent-icon">🌍</span>
-          <span class="agent-name">World-Builder</span>
-        </button>
-        <button class="agent-btn" data-agent="veilleur">
-          <span class="agent-icon">🔍</span>
-          <span class="agent-name">Veilleur</span>
-        </button>
-        <button class="agent-btn" data-agent="planificateur">
-          <span class="agent-icon">📋</span>
-          <span class="agent-name">Planificateur</span>
-        </button>
-      </div>
-      
-      <div class="chat-area">
-        <div class="chat-messages" id="chatMessages">
-          <div class="chat-welcome">
-            <h4>👋 Bienvenue !</h4>
-            <p>Sélectionne un agent pour t'aider.</p>
-            <div class="quick-actions">
-              <button class="quick-action quick-action-highlight" data-action="sync">🔄 Analyser les notes</button>
-              <button class="quick-action" data-action="feedback">📊 Feedback</button>
-              <button class="quick-action" data-action="questions">❓ Questions</button>
-              <button class="quick-action" data-action="research">🔍 Rechercher</button>
-            </div>
-          </div>
+    <!-- Partenaire d'écriture -->
+    <aside class="sidebar sidebar-right" id="sidebarRight" aria-label="Partenaire d'écriture">
+      <div class="partner-header">
+        <h3>Partenaire</h3>
+        <div class="partner-header-actions">
+          <button class="btn-link" id="btnNewConversation" title="Commencer une nouvelle conversation (l'actuelle est conservée)">Nouvelle conversation</button>
+          <button class="btn-icon" id="btnSettings" title="Paramètres" aria-label="Paramètres">⚙</button>
         </div>
-        
+      </div>
+      <div class="partner-status" id="partnerStatus" role="status" aria-live="polite"></div>
+
+      <div class="intent-bar" role="radiogroup" aria-label="Intention de travail">
+        <button class="intent-btn" role="radio" aria-checked="false" data-intent="explorer" title="Développer une idée, ouvrir des pistes (Ctrl+1)">Explorer</button>
+        <button class="intent-btn" role="radio" aria-checked="false" data-intent="structurer" title="Place de la scène, enjeux, enchaînement (Ctrl+2)">Structurer</button>
+        <button class="intent-btn" role="radio" aria-checked="false" data-intent="ecrire" title="Proposer une rédaction à partir de l'existant (Ctrl+3)">Écrire</button>
+        <button class="intent-btn" role="radio" aria-checked="false" data-intent="reviser" title="Diagnostic précis et corrections ciblées (Ctrl+4)">Réviser</button>
+        <button class="intent-btn" role="radio" aria-checked="false" data-intent="coherence" title="Contradictions avec le canon et la bible (Ctrl+5)">Cohérence</button>
+      </div>
+
+      <div class="chat-area">
+        <div class="chat-messages" id="chatMessages" aria-live="polite"></div>
+
+        <div class="partner-drawers">
+          <details class="partner-drawer" id="contextDrawer">
+            <summary>Contexte envoyé <span class="drawer-meta" id="contextSummary"></span></summary>
+            <div class="drawer-body" id="contextList"></div>
+          </details>
+          <details class="partner-drawer" id="canonDrawer">
+            <summary>Canon validé <span class="drawer-meta" id="canonCount"></span></summary>
+            <div class="drawer-body">
+              <div id="canonList"></div>
+              <div class="canon-add">
+                <input type="text" id="canonInput" placeholder="Ajouter un fait validé…" aria-label="Nouveau fait validé">
+                <button class="btn-secondary btn-small" id="btnAddCanon">Ajouter</button>
+              </div>
+            </div>
+          </details>
+          <details class="partner-drawer" id="variantsDrawer">
+            <summary>Variantes gardées <span class="drawer-meta" id="variantsCount"></span></summary>
+            <div class="drawer-body" id="variantsList"></div>
+          </details>
+        </div>
+
         <div class="chat-input-area">
-          <textarea class="chat-input" id="chatInput" placeholder="Écris ton message ou une URL à rechercher..." rows="3"></textarea>
+          <textarea class="chat-input" id="chatInput" aria-label="Message au partenaire" rows="3"></textarea>
           <div class="chat-actions">
-            <button class="btn-icon" id="btnAttachText" title="Joindre le texte">📎</button>
+            <span class="chat-hint">Entrée : envoyer · Maj+Entrée : à la ligne</span>
+            <button class="btn-secondary hidden" id="btnCancelChat">Annuler</button>
             <button class="btn-primary" id="btnSendChat">Envoyer</button>
           </div>
         </div>
       </div>
     </aside>
-  </div>
-
-  <!-- Modal Paramètres -->
-  <div class="modal hidden" id="modalSettings">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h3>Paramètres</h3>
-        <button class="btn-close" id="btnCloseSettings">×</button>
-      </div>
-      <div class="modal-body">
-        <div class="setting-group">
-          <label>Thème</label>
-          <select id="settingTheme">
-            <option value="dark">Sombre</option>
-            <option value="light">Clair</option>
-          </select>
-        </div>
-        <div class="setting-group">
-          <label>Fournisseur IA</label>
-          <select id="settingApiProvider">
-            <option value="openai">OpenAI (GPT-4)</option>
-            <option value="anthropic">Anthropic (Claude)</option>
-            <option value="manual">Manuel (copier-coller)</option>
-          </select>
-        </div>
-        <div class="setting-group" id="apiKeyGroup">
-          <label>Clé API</label>
-          <input type="password" id="settingApiKey" placeholder="sk-...">
-          <p class="setting-help">
-            <a href="https://platform.openai.com/api-keys" target="_blank">Obtenir une clé OpenAI</a> |
-            <a href="https://console.anthropic.com/" target="_blank">Obtenir une clé Anthropic</a>
-          </p>
-        </div>
-        <div class="setting-group">
-          <label>Dossier Projets</label>
-          <input type="text" id="settingProjectsPath" readonly>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn-secondary" id="btnCancelSettings">Annuler</button>
-        <button class="btn-primary" id="btnSaveSettings">Sauvegarder</button>
-      </div>
-    </div>
   </div>
 
   <!-- Modal Aide -->
@@ -315,11 +289,13 @@
             <div class="shortcut"><kbd>Ctrl+Y</kbd> Rétablir</div>
           </div>
           <div class="shortcut-category">
-            <h4>Agents</h4>
-            <div class="shortcut"><kbd>Ctrl+1</kbd> Writing Partner</div>
-            <div class="shortcut"><kbd>Ctrl+2</kbd> World-Builder</div>
-            <div class="shortcut"><kbd>Ctrl+3</kbd> Veilleur</div>
-            <div class="shortcut"><kbd>Ctrl+4</kbd> Planificateur</div>
+            <h4>Partenaire</h4>
+            <div class="shortcut"><kbd>Ctrl+Shift+P</kbd> Afficher / masquer</div>
+            <div class="shortcut"><kbd>Ctrl+1</kbd> Explorer</div>
+            <div class="shortcut"><kbd>Ctrl+2</kbd> Structurer</div>
+            <div class="shortcut"><kbd>Ctrl+3</kbd> Écrire</div>
+            <div class="shortcut"><kbd>Ctrl+4</kbd> Réviser</div>
+            <div class="shortcut"><kbd>Ctrl+5</kbd> Vérifier la cohérence</div>
           </div>
           <div class="shortcut-category">
             <h4>Affichage</h4>
@@ -332,7 +308,13 @@
     </div>
   </div>
 
+  <script src="core/schema.js"></script>
+  <script src="core/manga-parser.js"></script>
   <script src="core/project-model.js"></script>
+  <script src="core/partner-context.js"></script>
+  <script src="core/proposals.js"></script>
+  <script src="core/partner-store.js"></script>
+  <script src="components/partner-panel.js"></script>
   <script src="components/app.js"></script>
 </body>
 </html>

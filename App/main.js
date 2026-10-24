@@ -1,7 +1,12 @@
 const { app, BrowserWindow, ipcMain, dialog, Menu, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { isPathInside, atomicWriteFile, validateProjectName } = require('./lib/safe-fs');
+const {
+  isPathInside, atomicWriteFile, validateProjectName, writeWithBackup, listBackups, restoreBackup
+} = require('./lib/safe-fs');
+const ProjectSchema = require('./src/core/schema');
+const AI = require('./lib/ai-providers');
+const Settings = require('./lib/settings');
 
 let mainWindow;
 // Fermeture autorisée une fois que le renderer a vidé ses sauvegardes en attente
@@ -64,6 +69,8 @@ function getMenuTemplate() {
         { label: 'Nouveau projet', accelerator: 'CmdOrCtrl+N', click: () => mainWindow.webContents.send('menu-new') },
         { label: 'Enregistrer', accelerator: 'CmdOrCtrl+S', click: () => mainWindow.webContents.send('menu-save') },
         { type: 'separator' },
+        { label: 'Restaurer une sauvegarde du projet…', click: () => mainWindow.webContents.send('menu-restore-backup') },
+        { type: 'separator' },
         { role: 'quit', label: 'Quitter' }
       ]
     },
@@ -104,12 +111,15 @@ function getMenuTemplate() {
       ]
     },
     {
-      label: 'Agents',
+      label: 'Partenaire',
       submenu: [
-        { label: 'Writing Partner', accelerator: 'CmdOrCtrl+1', click: () => mainWindow.webContents.send('open-agent', 'writing-partner') },
-        { label: 'World-Builder', accelerator: 'CmdOrCtrl+2', click: () => mainWindow.webContents.send('open-agent', 'world-builder') },
-        { label: 'Veilleur', accelerator: 'CmdOrCtrl+3', click: () => mainWindow.webContents.send('open-agent', 'veilleur') },
-        { label: 'Planificateur', accelerator: 'CmdOrCtrl+4', click: () => mainWindow.webContents.send('open-agent', 'planificateur') }
+        { label: 'Afficher / masquer le partenaire', accelerator: 'CmdOrCtrl+Shift+P', click: () => mainWindow.webContents.send('toggle-partner') },
+        { type: 'separator' },
+        { label: 'Explorer', accelerator: 'CmdOrCtrl+1', click: () => mainWindow.webContents.send('partner-intent', 'explorer') },
+        { label: 'Structurer', accelerator: 'CmdOrCtrl+2', click: () => mainWindow.webContents.send('partner-intent', 'structurer') },
+        { label: 'Écrire', accelerator: 'CmdOrCtrl+3', click: () => mainWindow.webContents.send('partner-intent', 'ecrire') },
+        { label: 'Réviser', accelerator: 'CmdOrCtrl+4', click: () => mainWindow.webContents.send('partner-intent', 'reviser') },
+        { label: 'Vérifier la cohérence', accelerator: 'CmdOrCtrl+5', click: () => mainWindow.webContents.send('partner-intent', 'coherence') }
       ]
     },
     {
@@ -174,14 +184,55 @@ handle('create-project', async (event, name) => {
       return { success: false, error: `Un projet « ${projectName} » existe déjà.` };
     }
     fs.mkdirSync(projectPath);
-    const initialData = {
-      title: projectName,
-      script: [], sequences: [], characters: [], places: [], systems: [],
-      timeline: [], refs: [], todos: []
-    };
+    const initialData = ProjectSchema.createEmptyProject(projectName);
     atomicWriteFile(path.join(projectPath, '_PROJECT.json'), JSON.stringify(initialData, null, 2));
     atomicWriteFile(path.join(projectPath, '_NOTES.md'), `# Notes — ${projectName}\n\n`);
     return { success: true, project: { name: projectName, path: projectPath } };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Dossier de projet direct (Projets/<Nom>), jamais un sous-dossier ni un autre emplacement
+const isProjectDir = (p) => typeof p === 'string' && isAllowedPath(p) &&
+  path.resolve(path.dirname(p)).toLowerCase() === path.resolve(PROJECTS_PATH).toLowerCase();
+
+// Migration de _PROJECT.json : sauvegarde datée, puis écriture vérifiée.
+// Le main process recontrôle que rien n'est perdu par rapport au fichier sur disque.
+handle('migrate-project', async (event, projectPath, content, options = {}) => {
+  if (!isProjectDir(projectPath)) return outsideScope(projectPath);
+  if (typeof content !== 'string') return { success: false, error: 'Contenu invalide.' };
+  const filePath = path.join(projectPath, '_PROJECT.json');
+  try {
+    const before = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    const after = JSON.parse(content);
+    if (ProjectSchema.schemaVersionOf(before) >= ProjectSchema.SCHEMA_VERSION) {
+      return { success: false, error: 'Le fichier sur disque est déjà au format actuel.' };
+    }
+    const problems = ProjectSchema.verifyMigration(before, after, { rolesToSuggestions: !!options.rolesToSuggestions });
+    if (problems.length) {
+      return { success: false, error: `Migration refusée, des données seraient modifiées : ${problems.slice(0, 5).join(' ; ')}` };
+    }
+    const backupPath = writeWithBackup(filePath, content, `v${ProjectSchema.schemaVersionOf(before)}`);
+    return { success: true, backup: path.basename(backupPath) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+handle('list-project-backups', async (event, projectPath) => {
+  if (!isProjectDir(projectPath)) return outsideScope(projectPath);
+  try {
+    return { success: true, backups: listBackups(projectPath) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+handle('restore-project-backup', async (event, projectPath, backupName) => {
+  if (!isProjectDir(projectPath)) return outsideScope(projectPath);
+  try {
+    return { success: true, ...restoreBackup(projectPath, backupName) };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -240,9 +291,9 @@ handle('get-paths', () => {
   };
 });
 
-// === Paramètres & clé API ===
-// La clé est chiffrée via safeStorage (DPAPI sous Windows, liée à la session utilisateur)
-// et ne quitte jamais le main process : le renderer ne reçoit que `hasApiKey`.
+// === Paramètres & clés API ===
+// Une clé par fournisseur, chiffrée via safeStorage (DPAPI sous Windows, liée à la session
+// utilisateur). Les clés ne quittent jamais le main process : le renderer ne voit que `hasApiKey`.
 const SETTINGS_PATH = path.join(PARTNER_PATH, 'App', 'settings.json');
 
 function readSettingsFile() {
@@ -250,12 +301,14 @@ function readSettingsFile() {
     if (fs.existsSync(SETTINGS_PATH)) {
       return JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8'));
     }
-  } catch (e) {}
-  return { theme: 'dark', apiProvider: 'openai' };
+  } catch (e) {
+    console.error('settings.json illisible :', e.message);
+  }
+  return { theme: 'dark', apiProvider: 'none' };
 }
 
 function writeSettingsFile(stored) {
-  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(stored, null, 2));
+  atomicWriteFile(SETTINGS_PATH, JSON.stringify(stored, null, 2));
 }
 
 function encryptKey(plainKey) {
@@ -265,118 +318,77 @@ function encryptKey(plainKey) {
   return safeStorage.encryptString(plainKey).toString('base64');
 }
 
-function getApiKey() {
-  const stored = readSettingsFile();
-  if (!stored.apiKeyEnc) return '';
+function getApiKey(provider) {
+  const enc = readSettingsFile().providers?.[provider]?.apiKeyEnc;
+  if (!enc) return '';
   try {
-    return safeStorage.decryptString(Buffer.from(stored.apiKeyEnc, 'base64'));
+    return safeStorage.decryptString(Buffer.from(enc, 'base64'));
   } catch (e) {
     return '';
   }
 }
 
-// Migration : une ancienne clé en clair est chiffrée puis retirée du fichier
-function migratePlainKey() {
-  const stored = readSettingsFile();
-  if (!stored.apiKey) return;
+// Ancien format (clé unique, éventuellement en clair) → une clé chiffrée par fournisseur
+function migrateSettingsFile() {
   try {
-    stored.apiKeyEnc = encryptKey(stored.apiKey);
-    delete stored.apiKey;
-    writeSettingsFile(stored);
+    const { settings, changed } = Settings.migrateSettings(readSettingsFile(), encryptKey);
+    if (changed) writeSettingsFile(settings);
   } catch (e) {
-    console.error('Migration de la clé API impossible :', e.message);
+    console.error('Migration des paramètres impossible :', e.message);
   }
 }
 
-// Lire les paramètres (sans jamais renvoyer la clé)
-handle('get-settings', async () => {
-  const stored = readSettingsFile();
-  return {
-    theme: stored.theme || 'dark',
-    apiProvider: stored.apiProvider || 'openai',
-    hasApiKey: Boolean(stored.apiKeyEnc)
-  };
-});
+handle('get-settings', async () => Settings.publicSettings(readSettingsFile()));
 
-// Sauver les paramètres — apiKey vide = conserver la clé existante
-handle('save-settings', async (event, settings) => {
+handle('save-settings', async (event, update) => {
+  if (!update || typeof update !== 'object') return { success: false, error: 'Paramètres invalides.' };
   try {
-    const stored = readSettingsFile();
-    stored.theme = settings.theme;
-    stored.apiProvider = settings.apiProvider;
-    if (settings.clearApiKey) {
-      delete stored.apiKeyEnc;
-    } else if (typeof settings.apiKey === 'string' && settings.apiKey.trim()) {
-      stored.apiKeyEnc = encryptKey(settings.apiKey.trim());
-    }
-    delete stored.apiKey;
+    const stored = Settings.applySettingsUpdate(readSettingsFile(), update, encryptKey);
     writeSettingsFile(stored);
-    return { success: true, hasApiKey: Boolean(stored.apiKeyEnc) };
+    return { success: true, settings: Settings.publicSettings(readSettingsFile()) };
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-// Appel IA depuis le main process (la clé n'est jamais exposée au renderer)
-handle('ai-chat', async (event, provider, systemPrompt, userMessage) => {
-  const apiKey = getApiKey();
-  if (!apiKey) {
-    return { success: false, error: 'Aucune clé API configurée.' };
-  }
+// Appels IA en cours, annulables par leur identifiant
+const aiRequests = new Map();
 
+// Appel IA depuis le main process avec le fournisseur et le modèle choisis dans les paramètres
+handle('ai-chat', async (event, requestId, payload) => {
+  if (typeof requestId !== 'string' || !requestId || aiRequests.has(requestId)) {
+    return { success: false, error: 'Identifiant de demande invalide.' };
+  }
+  const stored = readSettingsFile();
+  const provider = Settings.activeProvider(stored);
+  if (provider === 'none') return { success: false, error: 'Aucun fournisseur IA choisi (Paramètres).' };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10 * 60 * 1000);
+  aiRequests.set(requestId, controller);
   try {
-    let response;
-    if (provider === 'openai') {
-      response = await fetch('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json; charset=utf-8',
-          'Authorization': `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-          model: 'gpt-4o',
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userMessage }
-          ],
-          temperature: 0.7,
-          max_tokens: 4000
-        })
-      });
-    } else if (provider === 'anthropic') {
-      response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json; charset=utf-8',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify({
-          model: 'claude-3-sonnet-20240229',
-          max_tokens: 4000,
-          system: systemPrompt,
-          messages: [{ role: 'user', content: userMessage }]
-        })
-      });
-    } else {
-      return { success: false, error: `Fournisseur inconnu : ${provider}` };
-    }
-
-    const errorOrBody = await response.text();
-    if (!response.ok) {
-      let message = errorOrBody || 'Erreur API inconnue';
-      try {
-        message = JSON.parse(errorOrBody).error?.message || message;
-      } catch (e) {}
-      return { success: false, error: message };
-    }
-
-    const data = JSON.parse(errorOrBody);
-    const text = provider === 'openai' ? data.choices[0].message.content : data.content[0].text;
-    return { success: true, text };
-  } catch (error) {
-    return { success: false, error: error.message };
+    const result = await AI.chat(provider, {
+      apiKey: getApiKey(provider),
+      model: Settings.modelFor(stored, provider),
+      system: payload?.system,
+      messages: payload?.messages,
+      signal: controller.signal
+    });
+    return { ...result, provider, model: result.model || Settings.modelFor(stored, provider) };
+  } finally {
+    clearTimeout(timeout);
+    aiRequests.delete(requestId);
   }
+});
+
+handle('ai-cancel', async (event, requestId) => {
+  const controller = aiRequests.get(requestId);
+  if (controller) controller.abort();
+  return { success: Boolean(controller) };
+});
+
+handle('ai-list-models', async (event, provider) => {
+  if (!AI.isProvider(provider)) return { success: false, error: 'Fournisseur inconnu.' };
+  return AI.listModels(provider, { apiKey: getApiKey(provider) });
 });
 
 // Créer un dossier (avec parents)
@@ -404,7 +416,7 @@ handle('show-prompt', async (event, title, label) => {
 
 // App lifecycle
 app.whenReady().then(() => {
-  migratePlainKey();
+  migrateSettingsFile();
   createWindow();
 });
 

@@ -25,9 +25,14 @@ class WritingPartnerApp {
     this.notesSaveTimer = null;
     // Si _PROJECT.json est illisible, on n'écrit jamais par-dessus
     this.projectLoadError = null;
-    this.currentAgent = 'writing-partner';
+    // Projet à l'ancien format : rien n'est écrit tant que la migration n'est pas validée
+    this.pendingMigration = null;
     this.settings = {};
-    this.editorMode = 'split'; // split, notes, script
+    this.editorMode = 'notes'; // notes (écrire), split (écrire + aperçu), script (aperçu)
+    // Document ouvert dans l'éditeur (fichier .md du projet) et compteur de modifications
+    this.currentDoc = null;
+    this.documents = [];
+    this.docVersion = 0;
     this.currentMainView = 'scenario'; // scenario, characters, places, etc.
     
     // Init
@@ -42,9 +47,10 @@ class WritingPartnerApp {
     // Setup all events
     this.setupProjectEvents();
     this.setupEditorEvents();
-    this.setupAgentEvents();
     this.setupModalEvents();
     this.setupMenuEvents();
+    this.setupPanels();
+    this.partner = new window.PartnerPanel(this);
 
     // Load projects into selector
     await this.loadProjectList();
@@ -60,19 +66,64 @@ class WritingPartnerApp {
   async toggleTheme() {
     const theme = this.settings.theme === 'dark' ? 'light' : 'dark';
     this.applyTheme(theme);
-    const result = await window.api.saveSettings({ theme, apiProvider: this.settings.apiProvider });
+    const result = await window.api.saveSettings({ theme });
     if (!result.success) {
-      this.addChatMessage(`❌ Thème non enregistré : ${result.error}`, 'assistant');
+      this.addChatMessage(`Thème non enregistré : ${result.error}`, 'error');
     }
+  }
+
+  get editor() {
+    return document.getElementById('notesEditor');
+  }
+
+  // === Panneaux repliables ===
+  // Sous 1 180 px de large, navigation et partenaire alternent pour garder la largeur d'écriture
+  setupPanels() {
+    const read = (key, fallback) => {
+      try { const v = localStorage.getItem(key); return v === null ? fallback : v === '1'; } catch (e) { return fallback; }
+    };
+    this.setPanelVisible('nav', read('panel.nav', true));
+    this.setPanelVisible('partner', read('panel.partner', true));
+    let mode = 'notes';
+    try { mode = localStorage.getItem('editor.mode') || 'notes'; } catch (e) {}
+    this.setEditorMode(['notes', 'split', 'script'].includes(mode) ? mode : 'notes');
+    document.getElementById('btnToggleNav').addEventListener('click', () => this.setPanelVisible('nav', document.body.classList.contains('nav-hidden')));
+    document.getElementById('btnTogglePartner').addEventListener('click', () => this.setPanelVisible('partner', document.body.classList.contains('partner-hidden')));
+    // Fenêtre rétrécie avec les deux panneaux ouverts : la navigation se replie
+    const fit = () => {
+      const body = document.body.classList;
+      if (window.innerWidth < 1180 && !body.contains('nav-hidden') && !body.contains('partner-hidden')) {
+        this.setPanelVisible('nav', false);
+      }
+    };
+    window.addEventListener('resize', fit);
+    fit();
+  }
+
+  setPanelVisible(panel, visible) {
+    const narrow = window.innerWidth < 1180;
+    document.body.classList.toggle(`${panel}-hidden`, !visible);
+    if (visible && narrow) {
+      const other = panel === 'nav' ? 'partner' : 'nav';
+      document.body.classList.add(`${other}-hidden`);
+    }
+    ['nav', 'partner'].forEach(name => {
+      const shown = !document.body.classList.contains(`${name}-hidden`);
+      const btn = document.getElementById(name === 'nav' ? 'btnToggleNav' : 'btnTogglePartner');
+      if (btn) btn.setAttribute('aria-pressed', String(shown));
+      try { localStorage.setItem(`panel.${name}`, shown ? '1' : '0'); } catch (e) {}
+    });
   }
 
   // === Menu, raccourcis et fermeture ===
   setupMenuEvents() {
     window.api.onMenuNew(() => this.createNewProject());
     window.api.onMenuSave(() => this.saveAll());
+    window.api.onMenuRestoreBackup(() => this.restoreProjectBackup());
     window.api.onToggleTheme(() => this.toggleTheme());
     window.api.onToggleFocus(() => document.body.classList.toggle('focus-mode'));
-    window.api.onOpenAgent((agent) => this.selectAgent(agent));
+    window.api.onTogglePartner(() => this.setPanelVisible('partner', document.body.classList.contains('partner-hidden')));
+    window.api.onPartnerIntent((intent) => this.partner.focus(intent));
     window.api.onShowShortcuts(() => this.toggleHelp(true));
 
     document.getElementById('btnCloseHelp').addEventListener('click', () => this.toggleHelp(false));
@@ -95,15 +146,6 @@ class WritingPartnerApp {
     if (show) document.getElementById('btnCloseHelp').focus();
   }
 
-  selectAgent(agent) {
-    const btn = document.querySelector(`.agent-btn[data-agent="${agent}"]`);
-    if (!btn) return;
-    document.querySelectorAll('.agent-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    this.currentAgent = agent;
-    document.getElementById('chatInput').focus();
-  }
-
   // === Enregistrement ===
   // États affichés : saved (seulement après écriture confirmée), dirty, saving, error
   setSaveState(state, detail = '') {
@@ -122,10 +164,11 @@ class WritingPartnerApp {
 
   // Enregistre tout ce qui est en attente ; renvoie false si une écriture a échoué
   async saveAll() {
-    const notesOk = await this.flushNotes();
+    if (this.currentDoc) this.partner.rememberDocument(this.currentDoc.name, this.editor.selectionStart);
+    const [notesOk, partnerOk] = await Promise.all([this.flushNotes(), this.partner.flush()]);
     // Projet illisible : rien n'a pu y être modifié (synchro et import bloqués), rien à écrire
     const projectOk = this.currentProject && !this.projectLoadError ? await this.saveProject() : true;
-    return notesOk && projectOk;
+    return notesOk && partnerOk && projectOk;
   }
   
   // === Project Management ===
@@ -153,7 +196,8 @@ class WritingPartnerApp {
         : null;
 
       // Enregistrer le projet quitté avant de changer
-      const ok = await this.flushNotes();
+      if (this.currentDoc) this.partner.rememberDocument(this.currentDoc.name, this.editor.selectionStart);
+      const [ok] = await Promise.all([this.flushNotes(), this.partner.flush()]);
       if (!ok && !confirm('Les notes du projet actuel n\'ont pas pu être enregistrées. Changer de projet quand même ?')) {
         select.value = this.currentProject?.path || '';
         return;
@@ -186,6 +230,7 @@ class WritingPartnerApp {
     const container = document.getElementById('scriptContent');
     const paneTitle = document.querySelector('#scriptPane .pane-title');
     this.currentMainView = viewType;
+    if (this.editorMode === 'notes') this.setEditorMode('split');
     
     // Mettre à jour le titre du panneau
     const titles = {
@@ -276,7 +321,8 @@ class WritingPartnerApp {
             <div class="main-card character-main-card" data-index="${i}">
               <div class="main-card-header">
                 <h3>${c.name || '[Sans nom]'}</h3>
-                ${c.role ? `<span class="card-tag role-tag">${c.role}</span>` : ''}
+                ${c.role ? `<span class="card-tag role-tag">${c.role}</span>`
+                  : c.suggestedRole ? `<span class="card-tag role-tag suggestion-tag" title="Rôle suggéré, à confirmer">${this.escapeHtml(c.suggestedRole)} ?</span>` : ''}
               </div>
               <div class="main-card-body">
                 ${c.description ? `<p class="card-description">${c.description}</p>` : ''}
@@ -495,10 +541,10 @@ class WritingPartnerApp {
     const loadToken = this.loadToken = (this.loadToken || 0) + 1;
 
     const dataPath = `${project.path}/_PROJECT.json`;
-    const notesPath = `${project.path}/_NOTES.md`;
-    const [result, notesResult] = await Promise.all([
+    const [result, files, partnerEntry] = await Promise.all([
       window.api.readFile(dataPath),
-      window.api.readFile(notesPath)
+      window.api.listFiles(project.path),
+      this.partner.load(project)
     ]);
     if (loadToken !== this.loadToken) return;
 
@@ -522,26 +568,35 @@ class WritingPartnerApp {
       this.projectLoadError = `_PROJECT.json n'a pas pu être lu (${result.error}). Rien ne sera écrit par-dessus.`;
     }
 
-    // S'assurer que les tableaux existent (sans toucher au contenu existant)
-    ['script', 'sequences', 'characters', 'places', 'systems', 'timeline', 'refs', 'todos'].forEach(key => {
+    // Format du fichier : ancien format → migration proposée (rien n'est écrit sans accord),
+    // format inconnu ou plus récent → lecture seule
+    this.pendingMigration = null;
+    if (!this.projectLoadError) {
+      const plan = window.ProjectSchema.planMigration(this.projectData);
+      if (plan.status === 'too-new' || plan.status === 'invalid') {
+        this.projectLoadError = `${plan.error} Rien ne sera écrit par-dessus.`;
+      } else if (plan.status === 'migrate') {
+        this.pendingMigration = { project, raw: JSON.parse(result.content) };
+      } else {
+        // Format actuel : un élément ajouté sans identifiant en reçoit un (enregistré à la prochaine écriture)
+        window.ProjectSchema.ensureIds(this.projectData);
+      }
+    }
+
+    // S'assurer que les tableaux existent en mémoire (sans toucher au contenu existant)
+    window.ProjectSchema.COLLECTIONS.forEach(key => {
       if (!Array.isArray(this.projectData[key])) this.projectData[key] = [];
     });
 
-    // Notes : une erreur de lecture (autre qu'un fichier absent) passe l'éditeur en lecture seule
-    const notesEditor = document.getElementById('notesEditor');
-    if (notesResult.success) {
-      notesEditor.value = notesResult.content;
-      notesEditor.readOnly = false;
-    } else if (notesResult.code === 'ENOENT') {
-      notesEditor.value = '';
-      notesEditor.readOnly = false;
-    } else {
-      notesEditor.value = '';
-      notesEditor.readOnly = true;
-      this.addChatMessage(`❌ _NOTES.md n'a pas pu être lu (${notesResult.error}). L'éditeur est en lecture seule pour ne pas l'écraser.`, 'assistant');
-    }
-    this.updateWordCount();
+    // Documents du projet ; on rouvre le dernier document ouvert, sinon _NOTES.md
+    this.documents = this.listDocuments(files);
+    const last = partnerEntry.store.workspace?.lastDocument;
+    const docName = this.documents.some(d => d.name === last) ? last : '_NOTES.md';
+    await this.openDocument(docName, { flush: false, cursor: partnerEntry.store.workspace?.cursors?.[docName] });
+    if (loadToken !== this.loadToken) return;
     this.setSaveState('saved');
+    this.partner.render();
+    if (partnerEntry.error) this.addChatMessage(partnerEntry.error, 'error');
 
     if (this.projectLoadError) {
       this.setSaveState('error', this.projectLoadError);
@@ -552,22 +607,189 @@ class WritingPartnerApp {
     this.populateAllPanels();
     this.renderScript();
     this.renderScenarioOutline();
+
+    if (this.pendingMigration) await this.offerMigration();
   }
-  
+
+  // Vrai si le projet peut être modifié ; sinon propose la migration (une seule fois par demande)
+  async ensureMigrated() {
+    if (!this.pendingMigration) return true;
+    return this.offerMigration();
+  }
+
+  // Aperçu de la migration, sauvegarde datée puis écriture vérifiée. Retourne vrai si migré.
+  async offerMigration() {
+    const pending = this.pendingMigration;
+    if (!pending || this.migrationDialogOpen) return false;
+    const Schema = window.ProjectSchema;
+    const preview = Schema.planMigration(pending.raw);
+    const report = preview.report;
+
+    const idCount = Object.values(report.idsAdded).reduce((a, b) => a + b, 0);
+    const dup = report.duplicates;
+    const lines = [
+      `Ce projet utilise l'ancien format (v${report.from}). Le nouveau format (v${report.to}) ajoute :`,
+      `• une version de format et ${idCount} identifiant(s) stable(s) pour les éléments existants ;`,
+      report.collectionsCreated.length ? `• des listes vides : ${report.collectionsCreated.join(', ')}.` : null,
+      '',
+      'Rien n\'est supprimé, fusionné ni renommé. Une copie datée du fichier actuel est créée avant ' +
+        'l\'écriture ; elle peut être restaurée par Fichier › Restaurer une sauvegarde du projet.',
+      ''
+    ];
+    const dupLines = [];
+    if (dup.todos.length) dupLines.push(`• ${Schema.extraCount(dup.todos)} point(s) à traiter en double (${dup.todos.length} titre(s) répété(s))`);
+    if (dup.characters.length) dupLines.push(`• ${Schema.extraCount(dup.characters)} personnage(s) en double`);
+    if (dup.places.length) dupLines.push(`• ${Schema.extraCount(dup.places)} lieu(x) en double`);
+    if (dup.aliases.length) dupLines.push(`• ${dup.aliases.length} paire(s) de noms proches (ex. « ${dup.aliases[0].short} » / « ${dup.aliases[0].long} »)`);
+    if (dupLines.length) {
+      lines.push('Doublons possibles, conservés tels quels (signalés dans les listes, à traiter vous-même) :', ...dupLines, '');
+    }
+
+    this.migrationDialogOpen = true;
+    let choice;
+    try {
+      choice = await this.showConfirmDialog({
+        title: 'Mettre à jour le format du projet',
+        message: lines.filter(l => l !== null).join('\n'),
+        checkbox: report.guessedRoles
+          ? `Convertir en suggestions les ${report.guessedRoles} rôle(s) probablement devinés par l'ancien parseur ` +
+            '(Protagoniste, Antagoniste…). Les valeurs restent visibles comme « rôle suggéré ».'
+          : null,
+        confirmLabel: 'Sauvegarder et mettre à jour',
+        cancelLabel: 'Plus tard'
+      });
+    } finally {
+      this.migrationDialogOpen = false;
+    }
+
+    if (!choice.confirmed) {
+      this.addChatMessage('ℹ️ Projet ouvert à l\'ancien format : lecture et notes disponibles, mais l\'analyse, l\'import ' +
+        'et les modifications de fiches demandent la mise à jour du format (aucune écriture d\'ici là).', 'assistant');
+      return false;
+    }
+    if (this.pendingMigration !== pending || this.currentProject?.path !== pending.project.path) return false;
+
+    const options = { rolesToSuggestions: !!choice.checked };
+    const plan = Schema.planMigration(pending.raw, options);
+    const problems = Schema.verifyMigration(pending.raw, plan.data, options);
+    if (problems.length) {
+      this.addChatMessage(`❌ Migration annulée, contrôle échoué : ${problems.slice(0, 5).join(' ; ')}. Rien n'a été écrit.`, 'assistant');
+      return false;
+    }
+
+    const result = await window.api.migrateProject(pending.project.path, JSON.stringify(plan.data, null, 2), options);
+    if (this.currentProject?.path !== pending.project.path) return false;
+    if (!result.success) {
+      this.setSaveState('error', result.error);
+      this.addChatMessage(`❌ Migration non effectuée : ${result.error}. Le fichier d'origine n'a pas été modifié.`, 'assistant');
+      return false;
+    }
+
+    this.pendingMigration = null;
+    this.projectData = plan.data;
+    this.populateAllPanels();
+    this.renderScript();
+    this.renderScenarioOutline();
+    this.setSaveState(this.pendingNotes ? 'dirty' : 'saved');
+    this.addChatMessage(`✅ Format du projet mis à jour (v${report.to}). Sauvegarde de l'ancien fichier : ${result.backup}` +
+      (options.rolesToSuggestions ? `\n${plan.report.rolesConverted} rôle(s) convertis en suggestions.` : ''), 'assistant');
+    return true;
+  }
+
+  // Fichier › Restaurer une sauvegarde du projet
+  async restoreProjectBackup() {
+    if (!this.currentProject) {
+      this.addChatMessage('⚠️ Sélectionne d\'abord un projet.', 'assistant');
+      return;
+    }
+    const project = this.currentProject;
+    const list = await window.api.listProjectBackups(project.path);
+    if (!list.success) {
+      this.addChatMessage(`❌ Sauvegardes illisibles : ${list.error}`, 'assistant');
+      return;
+    }
+    if (!list.backups.length) {
+      this.addChatMessage(`ℹ️ Aucune sauvegarde datée pour « ${project.name} ».`, 'assistant');
+      return;
+    }
+    const choice = await this.showConfirmDialog({
+      title: 'Restaurer une sauvegarde',
+      message: `Le fichier _PROJECT.json actuel de « ${project.name} » sera lui-même sauvegardé avant d'être remplacé. ` +
+        'Les notes (_NOTES.md) ne sont pas concernées.',
+      select: list.backups,
+      confirmLabel: 'Restaurer',
+      cancelLabel: 'Annuler'
+    });
+    if (!choice.confirmed || this.currentProject?.path !== project.path) return;
+
+    if (!(await this.flushNotes()) &&
+        !confirm('Les notes n\'ont pas pu être enregistrées. Restaurer quand même ?')) return;
+    const result = await window.api.restoreProjectBackup(project.path, choice.selected);
+    if (!result.success) {
+      this.addChatMessage(`❌ Restauration impossible : ${result.error}. Rien n'a été modifié.`, 'assistant');
+      return;
+    }
+    await this.loadProject(project);
+    this.addChatMessage(`✅ « ${result.restored} » restauré.` +
+      (result.safetyCopy ? ` La version remplacée est conservée dans ${result.safetyCopy}.` : ''), 'assistant');
+  }
+
+  // Dialogue de confirmation accessible : message, case à cocher ou liste de choix optionnelles
+  showConfirmDialog({ title, message, checkbox = null, select = null, confirmLabel = 'OK', cancelLabel = 'Annuler' }) {
+    return new Promise((resolve) => {
+      const previousFocus = document.activeElement;
+      const overlay = document.createElement('div');
+      overlay.className = 'confirm-dialog-overlay';
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:9999;';
+      overlay.innerHTML = `
+        <div role="dialog" aria-modal="true" aria-labelledby="confirmDialogTitle"
+             style="background:var(--bg-secondary);color:var(--text-primary);padding:24px;border-radius:6px;width:min(560px,90vw);max-height:85vh;overflow:auto;">
+          <h3 id="confirmDialogTitle" style="margin:0 0 12px 0;"></h3>
+          <div class="confirm-dialog-message" style="white-space:pre-wrap;line-height:1.5;color:var(--text-secondary);"></div>
+          ${select ? '<label style="display:block;margin-top:12px;">Sauvegarde : <select id="confirmDialogSelect" style="width:100%;margin-top:4px;padding:6px;"></select></label>' : ''}
+          ${checkbox ? '<label style="display:flex;gap:8px;margin-top:12px;align-items:flex-start;"><input type="checkbox" id="confirmDialogCheck"><span class="confirm-dialog-check-label"></span></label>' : ''}
+          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px;">
+            <button type="button" class="btn-secondary" data-action="cancel"></button>
+            <button type="button" class="btn-primary" data-action="confirm"></button>
+          </div>
+        </div>`;
+      // Textes insérés en textContent : aucun contenu de projet n'est interprété comme HTML
+      overlay.querySelector('#confirmDialogTitle').textContent = title;
+      overlay.querySelector('.confirm-dialog-message').textContent = message;
+      overlay.querySelector('[data-action="cancel"]').textContent = cancelLabel;
+      overlay.querySelector('[data-action="confirm"]').textContent = confirmLabel;
+      if (checkbox) overlay.querySelector('.confirm-dialog-check-label').textContent = checkbox;
+      if (select) {
+        const el = overlay.querySelector('#confirmDialogSelect');
+        select.forEach(value => el.appendChild(new Option(value, value)));
+      }
+
+      const close = (confirmed) => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey, true);
+        if (previousFocus && previousFocus.focus) previousFocus.focus();
+        resolve({
+          confirmed,
+          checked: !!overlay.querySelector('#confirmDialogCheck')?.checked,
+          selected: overlay.querySelector('#confirmDialogSelect')?.value || null
+        });
+      };
+      const onKey = (e) => {
+        if (e.key === 'Escape') { e.preventDefault(); close(false); }
+      };
+      overlay.querySelector('[data-action="cancel"]').addEventListener('click', () => close(false));
+      overlay.querySelector('[data-action="confirm"]').addEventListener('click', () => close(true));
+      document.addEventListener('keydown', onKey, true);
+      document.body.appendChild(overlay);
+      overlay.querySelector('[data-action="cancel"]').focus();
+    });
+  }
+
   getEmptyProjectData() {
     return {
-      title: this.currentProject?.name || 'Sans titre',
-      script: [],
-      sequences: [],
-      characters: [],
-      places: [],
-      systems: [],
-      timeline: [],
-      refs: [],
-      todos: [],
+      ...window.ProjectSchema.createEmptyProject(this.currentProject?.name || 'Sans titre'),
       notes: '',
-      synopsis: '',
-      arcs: []
+      synopsis: ''
     };
   }
   
@@ -575,12 +797,19 @@ class WritingPartnerApp {
     this.loadToken = (this.loadToken || 0) + 1;
     this.currentProject = null;
     this.projectLoadError = null;
+    this.pendingMigration = null;
     this.projectData = this.getEmptyProjectData();
     document.getElementById('currentProjectName').textContent = 'Aucun projet';
     document.getElementById('projectTabs').classList.add('hidden');
-    document.getElementById('notesEditor').value = '';
-    document.getElementById('notesEditor').readOnly = false;
+    this.currentDoc = null;
+    this.documents = [];
+    this.renderDocumentsList();
+    this.editor.value = '';
+    this.editor.readOnly = true;
+    document.getElementById('docTitle').textContent = 'Document';
     this.updateWordCount();
+    this.updatePosition();
+    this.partner.render();
     this.setSaveState('saved');
     document.getElementById('scriptContent').innerHTML = '<p class="empty-state">Sélectionne un projet</p>';
     document.getElementById('scenarioOutline').innerHTML = '<p class="empty-state">Sélectionne un projet pour voir sa structure</p>';
@@ -597,8 +826,10 @@ class WritingPartnerApp {
       return;
     }
 
-    if (!(await this.flushNotes()) &&
-        !confirm('Les notes du projet actuel n\'ont pas pu être enregistrées. Ouvrir le nouveau projet quand même ?')) {
+    if (this.currentDoc) this.partner.rememberDocument(this.currentDoc.name, this.editor.selectionStart);
+    const [notesOk] = await Promise.all([this.flushNotes(), this.partner.flush()]);
+    if (!notesOk &&
+        !confirm('Le document en cours n\'a pas pu être enregistré. Ouvrir le nouveau projet quand même ?')) {
       await this.loadProjectList();
       document.getElementById('projectSelect').value = this.currentProject?.path || '';
       return;
@@ -648,16 +879,26 @@ class WritingPartnerApp {
   setupEditorEvents() {
     const notesEditor = document.getElementById('notesEditor');
     
-    // Auto-save notes : le contenu est rattaché au projet où il a été tapé
+    // Enregistrement automatique : le contenu est rattaché au projet et au document où il a été tapé
     notesEditor.addEventListener('input', () => {
       this.updateWordCount();
-      if (!this.currentProject || notesEditor.readOnly) return;
+      if (!this.currentProject || !this.currentDoc || notesEditor.readOnly) return;
       this.isModified = true;
-      this.pendingNotes = { project: this.currentProject, content: notesEditor.value };
+      this.docVersion++;
+      this.pendingNotes = { project: this.currentProject, doc: this.currentDoc, content: notesEditor.value };
       this.setSaveState('dirty');
+      this.onCursorMove();
 
       clearTimeout(this.notesSaveTimer);
       this.notesSaveTimer = setTimeout(() => this.flushNotes(), 2000);
+    });
+
+    // Position et sélection : bandeau et contexte du partenaire
+    ['keyup', 'mouseup', 'select', 'focus'].forEach(evt => notesEditor.addEventListener(evt, () => this.onCursorMove()));
+
+    document.getElementById('documentsList').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-doc]');
+      if (btn && btn.dataset.doc !== this.currentDoc?.name) this.openDocument(btn.dataset.doc);
     });
     
     // Editor mode buttons
@@ -688,6 +929,115 @@ class WritingPartnerApp {
     this.editorMode = mode;
     const dual = document.getElementById('dualEditor');
     dual.className = `dual-editor mode-${mode}`;
+    document.querySelectorAll('.editor-mode-btn').forEach(b => {
+      const active = b.dataset.mode === mode;
+      b.classList.toggle('active', active);
+      b.setAttribute('aria-pressed', String(active));
+    });
+    try { localStorage.setItem('editor.mode', mode); } catch (e) {}
+  }
+
+  // === Documents du projet ===
+  // Fichiers .md à la racine du dossier : _NOTES.md d'abord, puis les index (_), puis les autres
+  listDocuments(files) {
+    const list = (files?.success ? files.files : [])
+      .filter(f => !f.isDirectory && /\.md$/i.test(f.name) && !f.name.startsWith('.'))
+      .map(f => ({ name: f.name, path: f.path }));
+    if (!list.some(d => d.name === '_NOTES.md')) {
+      list.push({ name: '_NOTES.md', path: `${this.currentProject.path}/_NOTES.md`, missing: true });
+    }
+    const rank = (n) => (n === '_NOTES.md' ? 0 : n.startsWith('_') ? 1 : 2);
+    return list.sort((a, b) => rank(a.name) - rank(b.name) || a.name.localeCompare(b.name, 'fr'));
+  }
+
+  renderDocumentsList() {
+    const nav = document.getElementById('documentsNav');
+    const list = document.getElementById('documentsList');
+    nav.classList.toggle('hidden', !this.currentProject);
+    list.innerHTML = this.documents.map(d => {
+      const active = d.name === this.currentDoc?.name;
+      return `<li><button class="document-link${active ? ' active' : ''}" data-doc="${this.escapeHtml(d.name)}"${active ? ' aria-current="page"' : ''}>${this.escapeHtml(d.name.replace(/\.md$/i, ''))}</button></li>`;
+    }).join('');
+  }
+
+  // Ouvre un document du projet. Le document quitté est enregistré d'abord ;
+  // une erreur de lecture (autre qu'un fichier absent) passe l'éditeur en lecture seule.
+  async openDocument(name, { flush = true, cursor = null } = {}) {
+    const project = this.currentProject;
+    const doc = this.documents.find(d => d.name === name);
+    if (!project || !doc) return false;
+    if (flush) {
+      if (this.currentDoc) this.partner.rememberDocument(this.currentDoc.name, this.editor.selectionStart);
+      if (!(await this.flushNotes()) &&
+          !confirm(`« ${this.currentDoc?.name} » n'a pas pu être enregistré. Ouvrir « ${name} » quand même ?`)) {
+        return false;
+      }
+    }
+    const result = await window.api.readFile(doc.path);
+    if (this.currentProject?.path !== project.path) return false;
+
+    const editor = this.editor;
+    this.currentDoc = { name: doc.name, path: doc.path };
+    this.docVersion = 0;
+    if (result.success) {
+      editor.value = result.content;
+      editor.readOnly = false;
+    } else if (result.code === 'ENOENT') {
+      editor.value = '';
+      editor.readOnly = false;
+    } else {
+      editor.value = '';
+      editor.readOnly = true;
+      this.addChatMessage(`« ${doc.name} » n'a pas pu être lu (${result.error}). L'éditeur est en lecture seule pour ne pas l'écraser.`, 'error');
+    }
+    document.getElementById('docTitle').textContent = doc.name;
+    const pos = Number.isInteger(cursor) ? Math.min(cursor, editor.value.length) : 0;
+    editor.setSelectionRange(pos, pos);
+    this.updateWordCount();
+    this.renderDocumentsList();
+    this.updatePosition();
+    this.partner.rememberDocument(doc.name, pos, { persist: flush });
+    this.partner.refreshContext();
+    if (flush) editor.focus();
+    return true;
+  }
+
+  // Remplace une plage du document ouvert en gardant l'annulation (Ctrl+Z) ; vérifie le résultat
+  replaceRange(start, end, text) {
+    const editor = this.editor;
+    if (editor.readOnly || !this.currentDoc) return false;
+    const expected = editor.value.slice(0, start) + text + editor.value.slice(end);
+    editor.focus();
+    editor.setSelectionRange(start, end);
+    let inserted = false;
+    try { inserted = document.execCommand('insertText', false, text); } catch (e) {}
+    if (!inserted || editor.value !== expected) {
+      editor.value = expected;
+      editor.dispatchEvent(new Event('input'));
+    }
+    if (editor.value !== expected) return false;
+    editor.setSelectionRange(start, start + text.length);
+    return true;
+  }
+
+  // Bandeau : projet › document › section du curseur
+  onCursorMove() {
+    if (this.cursorTimer) return;
+    this.cursorTimer = setTimeout(() => {
+      this.cursorTimer = null;
+      this.updatePosition();
+      this.partner.refreshContext();
+    }, 60);
+  }
+
+  updatePosition() {
+    const el = document.getElementById('docPosition');
+    if (!this.currentDoc) {
+      el.textContent = '';
+      return;
+    }
+    const section = window.PartnerContext.findSection(this.editor.value, this.editor.selectionStart);
+    el.textContent = `› ${this.currentDoc.name} › ${section.title}`;
   }
   
   setupResizer() {
@@ -728,7 +1078,7 @@ class WritingPartnerApp {
       if (isCurrent()) this.setSaveState('saving');
       let result;
       try {
-        result = await window.api.writeFile(`${pending.project.path}/_NOTES.md`, pending.content);
+        result = await window.api.writeFile(pending.doc.path, pending.content);
       } catch (error) {
         result = { success: false, error: error.message };
       }
@@ -737,7 +1087,7 @@ class WritingPartnerApp {
         // Remettre en attente si rien de plus récent n'a été tapé entre-temps
         if (!this.pendingNotes) this.pendingNotes = pending;
         if (isCurrent()) this.setSaveState('error', result.error);
-        this.addChatMessage(`❌ Notes de « ${pending.project.name} » non enregistrées : ${result.error}`, 'assistant');
+        this.addChatMessage(`« ${pending.doc.name} » (${pending.project.name}) non enregistré : ${result.error}`, 'error');
         return false;
       }
       if (isCurrent() && !this.pendingNotes) {
@@ -789,6 +1139,7 @@ class WritingPartnerApp {
       this.addChatMessage(`❌ Import impossible : ${this.projectLoadError}`, 'assistant');
       return;
     }
+    if (!(await this.ensureMigrated())) return;
 
     const project = this.currentProject;
 
@@ -1248,24 +1599,30 @@ class WritingPartnerApp {
       this.addChatMessage(`❌ Analyse impossible : ${this.projectLoadError}`, 'assistant');
       return;
     }
+    if (!(await this.ensureMigrated())) return;
     if (this.syncInProgress) {
       this.addChatMessage('⏳ Une analyse est déjà en cours.', 'assistant');
       return;
     }
 
-    const notes = document.getElementById('notesEditor').value;
-    if (!notes.trim()) {
-      this.addChatMessage('⚠️ Aucune note à analyser.', 'assistant');
-      return;
-    }
-
     // Le résultat est rattaché au projet de départ : ignoré si l'utilisateur en change entre-temps
     const project = this.currentProject;
+    const notes = await this.readNotesText();
+    if (notes === null) return;
+    if (this.currentProject?.path !== project.path) return;
+    if (!notes.trim()) {
+      this.addChatMessage('⚠️ _NOTES.md est vide : rien à analyser.', 'assistant');
+      return;
+    }
     const stillCurrent = () => this.currentProject?.path === project.path && !this.projectLoadError;
 
     // Phase 1 : analyse locale (sans IA)
     this.addChatMessage('🔄 Analyse locale des notes...', 'user');
-    const local = window.ProjectModel.validateUpdates(this.parseNotesLocally(notes)).updates;
+    const parsedLocally = this.parseNotesLocally(notes);
+    const local = window.ProjectModel.validateUpdates(parsedLocally).updates;
+    const notices = parsedLocally._notices?.length
+      ? `\n\nÀ vérifier :\n${parsedLocally._notices.map(n => `• ${n}`).join('\n')}`
+      : '';
 
     const finish = async (updates, intro) => {
       if (!stillCurrent()) {
@@ -1276,7 +1633,7 @@ class WritingPartnerApp {
       const saved = await this.saveProject();
       this.populateAllPanels();
       this.renderScript();
-      const changes = this.describeChanges(summary) || 'Aucun élément nouveau.';
+      const changes = (this.describeChanges(summary) || 'Aucun élément nouveau.') + notices;
       this.addChatMessage(saved
         ? `✅ ${intro} (rien n'a été supprimé ni remplacé).\n\n${changes}`
         : `⚠️ ${intro}, mais le projet n'a PAS été enregistré.\n\n${changes}`, 'assistant');
@@ -1284,7 +1641,7 @@ class WritingPartnerApp {
     };
 
     // Sans IA configurée : analyse locale seule, c'est le mode attendu
-    if (!this.settings.hasApiKey || this.settings.apiProvider === 'manual') {
+    if (!this.settings.hasApiKey || !this.settings.model) {
       await finish(local, 'Analyse locale terminée');
       return;
     }
@@ -1321,7 +1678,7 @@ RÈGLES:
       : '';
 
     try {
-      const response = await this.callProvider(this.settings.apiProvider, prompt, sentNotes);
+      const response = await this.callProvider(prompt, sentNotes);
       const jsonMatch = response.match(/\{[\s\S]*\}/);
       let parsed = null;
       try {
@@ -1333,7 +1690,8 @@ RÈGLES:
         this.addChatMessage(`❌ L'IA a renvoyé une réponse inexploitable (${validation.error}). Aucune modification n'a été appliquée.`, 'assistant');
         return;
       }
-      await finish(this.mergeUpdates(local, validation.updates), `Analyse terminée${limitNote}`);
+      const aiUpdates = window.ProjectModel.rolesAsSuggestions(validation.updates, 'IA');
+      await finish(this.mergeUpdates(local, aiUpdates), `Analyse terminée${limitNote}`);
     } catch (error) {
       this.addChatMessage(`❌ L'IA n'a pas répondu (${error.message}). Aucune modification n'a été appliquée.`, 'assistant');
     } finally {
@@ -1342,277 +1700,6 @@ RÈGLES:
     }
   }
 
-  // Détecter si le contenu est un script manga
-  isMangaScript(content) {
-    const hasPages = /Page\s*\d+/i.test(content);
-    const hasSequences = /Séquence\s*\d+/i.test(content);
-    const hasDialogues = /^[A-ZÀ-Ÿ][a-zà-ÿA-ZÀ-Ÿ\s]*\s*[:：]/m.test(content) || /^-[^-]/m.test(content);
-    return hasPages && (hasSequences || hasDialogues);
-  }
-  
-  // Parser spécialisé pour les scripts manga
-  parseMangaScript(content) {
-    const result = {
-      sequences: [],
-      pages: [],
-      characters: new Map(),
-      todos: []
-    };
-    
-    const lines = content.split('\n');
-    let currentSequence = null;
-    let currentPage = null;
-    let currentSpeaker = null;
-    let isThought = false;
-    
-    lines.forEach((line, idx) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-      
-      // === SÉQUENCES ===
-      const seqMatch = trimmed.match(/^Séquence\s*(\d+)/i);
-      if (seqMatch) {
-        currentSequence = {
-          number: parseInt(seqMatch[1]),
-          title: trimmed,
-          pages: []
-        };
-        result.sequences.push(currentSequence);
-        return;
-      }
-      
-      // === PAGES (incluant doubles pages) ===
-      // Formats: "Page 1", "Double page 40-41", "Page/double page 68-69"
-      const pageMatch = trimmed.match(/^(?:Double\s+)?(?:page\/?)?(?:double\s+)?page\s*(\d+)(?:\s*[-–]\s*(\d+))?/i);
-      if (pageMatch) {
-        // Sauvegarder la page précédente
-        if (currentPage) {
-          result.pages.push(currentPage);
-          if (currentSequence) currentSequence.pages.push(currentPage.number);
-        }
-        
-        const startPage = parseInt(pageMatch[1]);
-        const endPage = pageMatch[2] ? parseInt(pageMatch[2]) : startPage;
-        
-        currentPage = {
-          number: startPage,
-          endNumber: endPage > startPage ? endPage : null,
-          sequence: currentSequence?.number || 1,
-          actions: [],
-          dialogues: [],
-          thoughts: [],
-          isDoublePage: endPage > startPage
-        };
-        currentSpeaker = null;
-        return;
-      }
-      
-      // Si pas encore de page, on est peut-être dans un titre ou intro
-      if (!currentPage) return;
-      
-      // === PERSONNAGES QUI PARLENT ===
-      // Format: "Nom :" ou "Nom (pensée)" - NOM = 1-3 mots max, pas une phrase
-      const speakerMatch = trimmed.match(/^([A-ZÀ-Ÿ][a-zà-ÿ]*(?:\s+[A-ZÀ-Ÿa-zà-ÿ]+){0,2})(?:\s*\(([^)]+)\))?\s*[:：]\s*$/);
-      const speakerWithDialogueMatch = trimmed.match(/^([A-ZÀ-Ÿ][a-zà-ÿ]*(?:\s+[A-ZÀ-Ÿa-zà-ÿ]+){0,2})(?:\s*\(([^)]+)\))?\s*[:：]\s*(.+)$/);
-      
-      if (speakerMatch || speakerWithDialogueMatch) {
-        const match = speakerWithDialogueMatch || speakerMatch;
-        let speakerName = match[1].trim();
-        
-        // FILTRER les faux positifs (phrases, pas des noms)
-        const isPhrase = speakerName.split(/\s+/).length > 3 ||
-          /\b(et|ou|dans|sur|pour|avec|est|sont|ont|fait|va|vont|se|ils|elles|il|elle|un|une|le|la|les)\b/i.test(speakerName);
-        
-        if (isPhrase) {
-          // C'est une action, pas un personnage
-          currentPage.actions.push({ type: 'action', text: trimmed });
-          currentSpeaker = null;
-          return;
-        }
-        
-        const modifier = match[2]?.toLowerCase() || '';
-        isThought = modifier.includes('pensée') || modifier.includes('pensee') || modifier.includes('voix off') || modifier.includes('en pensées');
-        
-        // Normaliser le nom (Ari Rutoru -> Ari si Ari existe déjà)
-        speakerName = this.normalizeCharacterName(speakerName, result.characters);
-        currentSpeaker = speakerName;
-        
-        // Enregistrer le personnage
-        if (!result.characters.has(currentSpeaker)) {
-          result.characters.set(currentSpeaker, {
-            name: currentSpeaker,
-            role: '', // Sera calculé à la fin avec tout le contexte
-            dialogueCount: 0,
-            firstAppearance: currentPage.number
-          });
-        }
-        result.characters.get(currentSpeaker).dialogueCount++;
-        
-        // Si dialogue sur même ligne
-        if (speakerWithDialogueMatch && match[3]) {
-          const dialogue = match[3].trim();
-          if (isThought) {
-            currentPage.thoughts.push({ speaker: currentSpeaker, text: dialogue });
-          } else {
-            currentPage.dialogues.push({ speaker: currentSpeaker, text: dialogue });
-          }
-        }
-        return;
-      }
-      
-      // === DIALOGUES (lignes avec tiret) ===
-      const dialogueMatch = trimmed.match(/^[-–—]\s*(.+)/);
-      if (dialogueMatch && currentSpeaker) {
-        const text = dialogueMatch[1].trim();
-        if (isThought) {
-          currentPage.thoughts.push({ speaker: currentSpeaker, text });
-        } else {
-          currentPage.dialogues.push({ speaker: currentSpeaker, text });
-        }
-        return;
-      }
-      
-      // === DIALOGUES ENTRE GUILLEMETS ===
-      const quotedMatch = trimmed.match(/^["«"](.+?)["»"]$/);
-      if (quotedMatch && currentSpeaker) {
-        const text = quotedMatch[1].trim();
-        if (isThought) {
-          currentPage.thoughts.push({ speaker: currentSpeaker, text });
-        } else {
-          currentPage.dialogues.push({ speaker: currentSpeaker, text });
-        }
-        return;
-      }
-      
-      // === ACTIONS / DESCRIPTIONS ===
-      // Si la ligne ne commence pas par un tiret et n'est pas un personnage
-      if (!trimmed.startsWith('-') && !trimmed.startsWith('(') && trimmed.length > 5) {
-        // Vérifier si c'est une indication entre parenthèses
-        const parenMatch = trimmed.match(/^\((.+)\)$/);
-        if (parenMatch) {
-          currentPage.actions.push({ type: 'indication', text: parenMatch[1] });
-        } else {
-          currentPage.actions.push({ type: 'action', text: trimmed });
-        }
-        currentSpeaker = null; // Reset speaker après une action
-      }
-    });
-    
-    // Sauvegarder la dernière page
-    if (currentPage) {
-      result.pages.push(currentPage);
-      if (currentSequence) currentSequence.pages.push(currentPage.number);
-    }
-    
-    // === CALCUL DES RÔLES AVEC TOUT LE CONTEXTE ===
-    // Maintenant qu'on a tous les personnages, on peut deviner les rôles
-    for (const [name, char] of result.characters) {
-      char.role = this.guessCharacterRole(name, content, result.characters);
-    }
-    
-    return result;
-  }
-  
-  // Normaliser les noms de personnages (Ari Rutoru -> Ari si "Ari" existe)
-  normalizeCharacterName(name, existingChars) {
-    const lowName = name.toLowerCase().trim();
-    
-    // Vérifier si le prénom seul existe déjà
-    const parts = name.split(/\s+/);
-    if (parts.length > 1) {
-      const firstName = parts[0];
-      // Si "Prénom" existe déjà, utiliser "Prénom" au lieu de "Prénom Nom"
-      if (existingChars.has(firstName)) {
-        return firstName;
-      }
-    }
-    
-    // Vérifier si c'est un prénom et qu'un "Prénom Nom" existe
-    for (const [existingName] of existingChars) {
-      const existingLow = existingName.toLowerCase();
-      // Si "Ari Rutoru" existe et on reçoit "Ari", utiliser "Ari"
-      if (existingLow.startsWith(lowName + ' ')) {
-        return name; // Garder le prénom court
-      }
-      // Si "Ari" existe et on reçoit "Ari Rutoru", utiliser "Ari"
-      if (lowName.startsWith(existingLow + ' ')) {
-        return existingName; // Utiliser le nom court existant
-      }
-    }
-    
-    return name;
-  }
-  
-  // Deviner le rôle d'un personnage basé sur le contexte
-  guessCharacterRole(name, content, allCharacters = null) {
-    const lowName = name.toLowerCase();
-    const lowContent = content.toLowerCase();
-    
-    // === ANALYSE INTELLIGENTE DU RÔLE ===
-    
-    // Compter combien de fois le personnage apparaît en "pensée"
-    const thoughtCount = (content.match(new RegExp(`${lowName}\\s*\\((?:pensée|en pensées?)\\)`, 'gi')) || []).length;
-    
-    // Trouver qui apparaît en premier (page 1)
-    const appearsFirst = lowContent.indexOf(`page 1`) < lowContent.indexOf(lowName + ' ') + 100;
-    const firstMention = lowContent.indexOf(lowName);
-    
-    // 1. PROTAGONISTE : beaucoup de pensées, apparaît tôt, on suit son point de vue
-    if (thoughtCount >= 2 || 
-        (appearsFirst && lowContent.includes(`${lowName} attend`)) ||
-        (lowContent.includes(`on suit ${lowName}`))) {
-      return 'Protagoniste';
-    }
-    
-    // 2. ANTAGONISTE : "Père" qui ordonne, manipule, ou explicitement appelé antagoniste
-    const isCalledPere = lowContent.includes(`${lowName}`) && 
-      (lowContent.includes(`oui, père`) || lowContent.includes(`merci, père`) || 
-       lowContent.includes(`bien sûr père`) || lowContent.includes(`p-p-père`));
-    const ordersExecution = lowContent.includes(`${lowName}`) &&
-      (lowContent.includes('finis le travail') || lowContent.includes('sacrifice') ||
-       lowContent.includes('extrêmement confidentiel') || lowContent.includes('tu connais le sort'));
-    const isCalledFou = lowContent.includes(`ce fou`) || lowContent.includes(`ce vieux fou`);
-    
-    if (isCalledPere || ordersExecution || isCalledFou) {
-      // Vérifier que ce n'est pas le protagoniste qui parle
-      if (thoughtCount < 2) {
-        return 'Antagoniste';
-      }
-    }
-    
-    // 3. TRAÎTRE : ami qui trahit, tire sur le héros
-    const betraysHero = lowContent.includes(`${lowName}`) &&
-      (lowContent.includes('les tient en joue') || 
-       (lowContent.includes(`${lowName}`) && lowContent.includes('tire') && lowContent.includes('c\'est bon, père')));
-    if (betraysHero) {
-      return 'Traître';
-    }
-    
-    // 4. ALLIÉ/REBELLE : veut renverser l'ordre établi
-    const wantsToRebel = lowContent.includes(`${lowName}`) &&
-      (lowContent.includes('mettre un terme') || lowContent.includes('règne') ||
-       lowContent.includes('dernière victime') || lowContent.includes('je vais devoir l\'éliminer'));
-    if (wantsToRebel && thoughtCount < 2) {
-      return 'Rebelle';
-    }
-    
-    // 5. FIGURANTS
-    const figurants = ['présentateur', 'technicien', 'majordome', 'serveur', 'garde'];
-    if (figurants.includes(lowName)) {
-      return 'Figurant';
-    }
-    
-    // 6. MILITAIRE (sans autre rôle)
-    if (lowContent.includes('capitaine ' + lowName)) {
-      return 'Capitaine';
-    }
-    if (lowContent.includes('lieutenant ' + lowName)) {
-      return 'Lieutenant';
-    }
-    
-    return 'Personnage';
-  }
-  
   // Convertir le parsing manga en format standard pour l'application
   convertMangaToUpdates(parsed) {
     const updates = {
@@ -1622,33 +1709,35 @@ RÈGLES:
       system_updates: [],
       timeline_updates: [],
       todos: [],
-      sequences: parsed.sequences // Garder les séquences pour le rendu
+      // Séquences : index dérivé (pages rattachées, lignes d'introduction conservées)
+      sequences: parsed.sequences.map(s => ({
+        number: s.number, title: s.title, label: s.label, pages: s.pages,
+        _intro: s.intro, sourceLine: s.line
+      }))
     };
-    
-    // Convertir les pages
+
+    // Convertir les pages : `_blocks` garde l'ordre exact action / dialogue / pensée et le texte source
     parsed.pages.forEach(page => {
-      // Combiner actions
       const actionText = page.actions.map(a => a.text).join(' ');
-      
-      // Combiner dialogues
       const dialogueText = page.dialogues.map(d => `${d.speaker}: "${d.text}"`).join('\n');
-      
-      // Combiner pensées
       const thoughtText = page.thoughts.map(t => `${t.speaker} (pensée): ${t.text}`).join('\n');
-      
-      // Personnage principal de la page
       const mainCharacter = page.dialogues[0]?.speaker || page.thoughts[0]?.speaker || null;
-      
+      const lastBlock = page.blocks[page.blocks.length - 1];
+
       updates.script_updates.push({
         page: page.number,
         endNumber: page.endNumber || null,
         isDoublePage: page.isDoublePage || false,
         sequence: page.sequence,
+        heading: page.heading || '',
         action: actionText,
         dialogue: dialogueText || null,
         thoughts: thoughtText || null,
         character: mainCharacter,
-        // Garder les données structurées
+        source: '_NOTES.md',
+        sourceLines: [page.line, lastBlock.line + lastBlock.raw.split('\n').length - 1],
+        _blocks: page.blocks,
+        // Vues séparées conservées pour la compatibilité (l'ordre commun est dans _blocks)
         _dialogues: page.dialogues,
         _thoughts: page.thoughts,
         _actions: page.actions
@@ -1658,11 +1747,7 @@ RÈGLES:
     // Convertir les personnages avec analyse approfondie
     const minDialogueForGeneric = 3;
     const genericRoles = ['présentateur', 'technicien', 'majordome', 'garde', 'soldat', 'voix'];
-    const content = parsed.pages.map(p => [
-      ...p.dialogues.map(d => `${d.speaker}: ${d.text}`),
-      ...p.thoughts.map(t => `${t.speaker} (pensée): ${t.text}`),
-      ...p.actions.map(a => a.text)
-    ].join('\n')).join('\n');
+    const content = parsed.pages.flatMap(p => p.blocks.map(b => b.raw)).join('\n');
     
     // === ANALYSE DU CONTEXTE DU MONDE ===
     const worldContext = this.analyzeWorldContext(content, parsed.pages);
@@ -1769,9 +1854,13 @@ RÈGLES:
         // Analyse approfondie du personnage
         const analysis = this.analyzeCharacter(name, char, parsed.pages, content);
         
+        // Le rôle n'est jamais attribué par l'analyse : seulement suggéré, avec sa justification
         updates.character_updates.push({
           name: char.name,
-          role: analysis.role,
+          ...(char.suggestion ? {
+            suggestedRole: char.suggestion.role,
+            suggestionSource: `analyse locale : ${char.suggestion.evidence}`
+          } : {}),
           type: analysis.type,
           description: analysis.description,
           traits: analysis.traits,
@@ -1868,7 +1957,7 @@ RÈGLES:
     });
     
     // === ANALYSE DU RÔLE NARRATIF ===
-    const role = this.guessCharacterRole(name, fullContent, null);
+    const role = charData.suggestion?.role || '';
     const type = this.determineCharacterType(name, role, dialogues, thoughts, actions, lowContent);
     
     // === ANALYSE DES TRAITS DE CARACTÈRE ===
@@ -2603,9 +2692,15 @@ RÈGLES:
   // Parsing local sans API - détection de patterns
   parseNotesLocally(notes) {
     // Détecter si c'est un script manga
-    if (this.isMangaScript(notes)) {
-      const mangaParsed = this.parseMangaScript(notes);
-      return this.convertMangaToUpdates(mangaParsed);
+    if (window.MangaParser.isMangaScript(notes)) {
+      const mangaParsed = window.MangaParser.parse(notes);
+      const updates = this.convertMangaToUpdates(mangaParsed);
+      const aliases = window.MangaParser.aliasCandidates(mangaParsed.characters.keys());
+      updates._notices = [
+        ...mangaParsed.warnings,
+        ...aliases.map(a => `Noms proches gardés séparés (à fusionner vous-même si c'est la même personne) : « ${a.short} » / « ${a.long} »`)
+      ];
+      return updates;
     }
     
     // Parser standard pour story bibles et notes génériques
@@ -2784,6 +2879,10 @@ RÈGLES:
       this.setSaveState('error', this.projectLoadError);
       return false;
     }
+    if (this.pendingMigration) {
+      this.setSaveState('error', 'Projet à l\'ancien format : migration à valider avant tout enregistrement.');
+      return false;
+    }
 
     const project = this.currentProject;
     let result;
@@ -2884,7 +2983,8 @@ RÈGLES:
         <div class="character-card" data-name="${c.name}">
           <div class="char-header">
             <div class="char-name">${c.name}</div>
-            ${c.role ? `<div class="char-role ${c.role.toLowerCase().replace(/[^a-z]/g, '')}">${c.role}</div>` : ''}
+            ${c.role ? `<div class="char-role ${c.role.toLowerCase().replace(/[^a-z]/g, '')}">${c.role}</div>`
+              : c.suggestedRole ? `<div class="char-role suggestion-tag" title="${this.escapeHtml(`Suggestion (${c.suggestionSource || 'extraction'}) — à confirmer`)}">${this.escapeHtml(c.suggestedRole)} ?</div>` : ''}
           </div>
           ${c.type ? `<div class="char-type">${c.type}</div>` : ''}
           ${c.description ? `<div class="char-description">${c.description}</div>` : ''}
@@ -3178,14 +3278,22 @@ RÈGLES:
       return;
     }
     
-    container.innerHTML = todos.map((t, i) => `
+    // Doublons possibles : signalés, jamais supprimés ni fusionnés automatiquement
+    const dupGroups = window.ProjectSchema.findDuplicateCandidates({ todos }).todos;
+    const dupOf = new Map();
+    dupGroups.forEach(g => g.items.forEach((item, rank) => dupOf.set(item.index, { rank: rank + 1, total: g.items.length })));
+    const dupNotice = dupGroups.length
+      ? `<p class="empty-state">${window.ProjectSchema.extraCount(dupGroups)} doublon(s) possible(s) sur ${dupGroups.length} titre(s), conservés : supprimez vous-même ceux qui sont en trop.</p>`
+      : '';
+
+    container.innerHTML = dupNotice + todos.map((t, i) => `
       <div class="todo-card clickable" data-index="${i}">
         <div class="todo-card-header">
-          <span class="todo-card-title">🔴 ${t.title}</span>
+          <span class="todo-card-title">🔴 ${this.escapeHtml(t.title)}${dupOf.has(i) ? `<span class="dup-tag">doublon possible ${dupOf.get(i).rank}/${dupOf.get(i).total}</span>` : ''}</span>
           ${t.pageRef ? `<span class="todo-page-ref">p.${t.pageRef}</span>` : ''}
           ${t.resolved ? '<span class="todo-resolved">✓</span>' : ''}
         </div>
-        <div class="todo-card-context">${t.context || ''}</div>
+        <div class="todo-card-context">${this.escapeHtml(t.context || '')}</div>
         <div class="todo-card-actions">
           <button class="btn-todo-action btn-goto" data-action="goto" data-index="${i}" title="Voir dans le scénario">📍 Localiser</button>
           <button class="btn-todo-action btn-resolve" data-action="resolve" data-index="${i}" title="Marquer comme résolu">✓</button>
@@ -3224,6 +3332,7 @@ RÈGLES:
   }
   
   async resolveTodo(index) {
+    if (!(await this.ensureMigrated())) return;
     if (this.projectData.todos[index]) {
       this.projectData.todos[index].resolved = true;
       await this.saveProject();
@@ -3233,6 +3342,7 @@ RÈGLES:
   }
   
   async deleteTodo(index) {
+    if (!(await this.ensureMigrated())) return;
     if (confirm('Supprimer ce point à traiter ?')) {
       this.projectData.todos.splice(index, 1);
       await this.saveProject();
@@ -3278,7 +3388,7 @@ RÈGLES:
     };
     
     // Détecter si c'est un script manga (a des données structurées)
-    const isMangaScript = script.some(s => s._dialogues || s._actions || s.sequence);
+    const isMangaScript = script.some(s => s._blocks || s._dialogues || s._actions || s.sequence);
     
     // Si aucune donnée
     const hasData = synopsis || script.length || arcs.length || todos.length;
@@ -3354,50 +3464,84 @@ RÈGLES:
     
     // === SCRIPT MANGA ===
     if (isMangaScript && script.length > 0) {
-      // Grouper par séquence
-      const pagesBySequence = {};
+      // Grouper par séquence (dans l'ordre d'apparition ; pages sans séquence à part)
+      const esc = (v) => this.escapeHtml(String(v ?? ''));
+      const pagesBySequence = new Map();
       script.forEach(page => {
-        const seq = page.sequence || 1;
-        if (!pagesBySequence[seq]) pagesBySequence[seq] = [];
-        pagesBySequence[seq].push(page);
+        const seq = page.sequence ?? null;
+        if (!pagesBySequence.has(seq)) pagesBySequence.set(seq, []);
+        pagesBySequence.get(seq).push(page);
       });
-      
+      const seqKeys = [...pagesBySequence.keys()].sort((a, b) => (a ?? -1) - (b ?? -1));
+
       html += `<section class="scenario-script">`;
-      
-      Object.keys(pagesBySequence).sort((a, b) => a - b).forEach(seqNum => {
-        const pages = pagesBySequence[seqNum];
-        const seqInfo = sequences.find(s => s.number === parseInt(seqNum));
-        
+
+      seqKeys.forEach(seqNum => {
+        const pages = pagesBySequence.get(seqNum);
+        const seqInfo = sequences.find(s => s.number === seqNum);
+
         html += `
-          <div class="sequence-block" data-sequence="${seqNum}">
+          <div class="sequence-block" data-sequence="${seqNum ?? ''}">
+            ${seqNum !== null ? `
             <div class="sequence-header">
-              <span class="sequence-number">Séquence ${seqNum}</span>
-              ${seqInfo?.title ? `<span class="sequence-title">${seqInfo.title}</span>` : ''}
-            </div>
+              <span class="sequence-number">Séquence ${esc(seqNum)}</span>
+              ${seqInfo?.label || seqInfo?.title ? `<span class="sequence-title">${esc(seqInfo.label || seqInfo.title)}</span>` : ''}
+            </div>` : ''}
             <div class="sequence-pages">
         `;
-        
+
         pages.forEach(page => {
           const pageNum = page.page || page.number;
           const endPageNum = page.endNumber || page._endNumber;
           const isDouble = page.isDoublePage || endPageNum;
-          const pageLabel = isDouble ? `Pages ${pageNum}-${endPageNum}` : `Page ${pageNum}`;
-          
-          html += `<div class="manga-page ${isDouble ? 'manga-double-page' : ''}" data-page="${pageNum}">`;
-          html += `<div class="manga-page-header">${pageLabel}</div>`;
+          const pageLabel = isDouble
+            ? (endPageNum ? `Double page ${pageNum}-${endPageNum}` : `Double page ${pageNum}`)
+            : `Page ${pageNum}`;
+
+          html += `<div class="manga-page ${isDouble ? 'manga-double-page' : ''}" data-page="${esc(pageNum)}">`;
+          html += `<div class="manga-page-header">${esc(pageLabel)}${page.heading ? ` — ${esc(page.heading)}` : ''}</div>`;
           html += `<div class="manga-page-content">`;
-          
-          // Actions/Descriptions
+
+          // Nouveau format : blocs dans l'ordre exact du texte source
+          if (Array.isArray(page._blocks)) {
+            page._blocks.forEach(b => {
+              if (b.type === 'header') {
+                if (b.line !== page.sourceLines?.[0] && b.raw) html += `<div class="manga-unknown">${esc(b.raw)}</div>`;
+              } else if (b.type === 'dialogue') {
+                html += `
+                  <div class="manga-dialogue">
+                    <span class="dialogue-speaker">${esc(b.speaker)}</span>
+                    <span class="dialogue-text">"${esc(b.text)}"</span>
+                  </div>`;
+              } else if (b.type === 'thought') {
+                html += `
+                  <div class="manga-thought">
+                    <span class="thought-speaker">${esc(b.speaker)}</span>
+                    <span class="thought-text">${esc(b.text)}</span>
+                  </div>`;
+              } else if (b.type === 'indication') {
+                html += `<div class="manga-indication">(${esc(b.text)})</div>`;
+              } else if (b.type === 'action') {
+                html += `<div class="manga-action">${esc(b.text)}</div>`;
+              } else {
+                html += `<div class="manga-unknown" title="Ligne non classée, conservée telle quelle">${esc(b.raw ?? b.text)}</div>`;
+              }
+            });
+            html += `</div></div>`;
+            return;
+          }
+
+          // Ancien format : actions, dialogues et pensées séparés (ordre commun inconnu)
           if (page._actions && page._actions.length > 0) {
             page._actions.forEach(action => {
               if (action.type === 'indication') {
-                html += `<div class="manga-indication">(${action.text})</div>`;
+                html += `<div class="manga-indication">(${esc(action.text)})</div>`;
               } else {
-                html += `<div class="manga-action">${action.text}</div>`;
+                html += `<div class="manga-action">${esc(action.text)}</div>`;
               }
             });
           } else if (page.action) {
-            html += `<div class="manga-action">${page.action}</div>`;
+            html += `<div class="manga-action">${esc(page.action)}</div>`;
           }
           
           // Dialogues
@@ -3405,13 +3549,13 @@ RÈGLES:
             page._dialogues.forEach(d => {
               html += `
                 <div class="manga-dialogue">
-                  <span class="dialogue-speaker">${d.speaker}</span>
-                  <span class="dialogue-text">"${d.text}"</span>
+                  <span class="dialogue-speaker">${esc(d.speaker)}</span>
+                  <span class="dialogue-text">"${esc(d.text)}"</span>
                 </div>
               `;
             });
           } else if (page.dialogue) {
-            html += `<div class="manga-dialogue-simple">${page.dialogue}</div>`;
+            html += `<div class="manga-dialogue-simple">${esc(page.dialogue)}</div>`;
           }
           
           // Pensées
@@ -3419,13 +3563,13 @@ RÈGLES:
             page._thoughts.forEach(t => {
               html += `
                 <div class="manga-thought">
-                  <span class="thought-speaker">${t.speaker}</span>
-                  <span class="thought-text">${t.text}</span>
+                  <span class="thought-speaker">${esc(t.speaker)}</span>
+                  <span class="thought-text">${esc(t.text)}</span>
                 </div>
               `;
             });
           } else if (page.thoughts) {
-            html += `<div class="manga-thought-simple">${page.thoughts}</div>`;
+            html += `<div class="manga-thought-simple">${esc(page.thoughts)}</div>`;
           }
           
           html += `</div></div>`;
@@ -3482,6 +3626,7 @@ RÈGLES:
   navigateToTodo(todoIndex) {
     const todo = this.projectData.todos[todoIndex];
     if (!todo) return;
+    if (this.editorMode === 'notes') this.setEditorMode('split');
     
     // Basculer vers l'onglet scénario
     document.querySelectorAll('.project-tab').forEach(t => t.classList.remove('active'));
@@ -3535,277 +3680,56 @@ RÈGLES:
   }
   
   // === Agent Events ===
-  setupAgentEvents() {
-    // Agent selection
-    document.querySelectorAll('.agent-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.agent-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        this.currentAgent = btn.dataset.agent;
-      });
-    });
-    
-    // Quick actions
-    document.querySelectorAll('.quick-action').forEach(btn => {
-      btn.addEventListener('click', () => this.executeQuickAction(btn.dataset.action));
-    });
-    
-    // Send message
-    document.getElementById('btnSendChat').addEventListener('click', () => this.sendMessage());
-    document.getElementById('chatInput').addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        this.sendMessage();
-      }
-    });
-    
-    // Attach text
-    document.getElementById('btnAttachText').addEventListener('click', () => this.attachText());
+  // Texte de _NOTES.md (source de l'analyse), qu'il soit ouvert ou non
+  async readNotesText() {
+    if (this.currentDoc?.name === '_NOTES.md') return this.editor.value;
+    if (!(await this.flushNotes())) return null;
+    const notesPath = `${this.currentProject.path}/_NOTES.md`;
+    const result = await window.api.readFile(notesPath);
+    if (result.success) return result.content;
+    if (result.code === 'ENOENT') return '';
+    this.addChatMessage(`_NOTES.md n'a pas pu être lu (${result.error}). Rien n'a été analysé.`, 'error');
+    return null;
   }
-  
-  executeQuickAction(action) {
-    switch (action) {
-      case 'sync':
-        this.syncNotesToScript();
-        break;
-      case 'feedback':
-        document.getElementById('chatInput').value = 'Donne-moi un feedback sur mon projet';
-        this.attachText();
-        this.sendMessage();
-        break;
-      case 'questions':
-        document.getElementById('chatInput').value = 'Quelles questions devrais-je me poser pour améliorer ce projet ?';
-        this.attachText();
-        this.sendMessage();
-        break;
-      case 'research':
-        const topic = prompt('Que veux-tu rechercher ?');
-        if (topic) {
-          document.getElementById('chatInput').value = topic;
-          this.currentAgent = 'veilleur';
-          document.querySelectorAll('.agent-btn').forEach(b => b.classList.remove('active'));
-          document.querySelector('[data-agent="veilleur"]').classList.add('active');
-          this.sendMessage();
-        }
-        break;
-    }
-  }
-  
-  attachText() {
-    const notes = document.getElementById('notesEditor').value;
-    const input = document.getElementById('chatInput');
-    if (notes) {
-      input.value += `\n\n---\nNotes actuelles:\n${notes.substring(0, 2000)}${notes.length > 2000 ? '...' : ''}`;
-    }
-  }
-  
-  async sendMessage() {
-    const input = document.getElementById('chatInput');
-    const message = input.value.trim();
-    if (!message) return;
-    
-    this.addChatMessage(message, 'user');
-    input.value = '';
-    
-    // Clear welcome
-    const welcome = document.querySelector('.chat-welcome');
-    if (welcome) welcome.remove();
-    
-    this.showTypingIndicator();
-    
-    // Check if Veilleur should search web
-    if (this.currentAgent === 'veilleur') {
-      await this.handleVeilleurRequest(message);
-    } else {
-      await this.callAI(message);
-    }
-  }
-  
-  // === Veilleur - Web Research ===
-  async handleVeilleurRequest(message) {
-    // Check for URLs in message
-    const urlMatch = message.match(/https?:\/\/[^\s]+/);
-    
-    if (urlMatch) {
-      // Fetch webpage content
-      this.hideTypingIndicator();
-      this.addChatMessage('🔍 Récupération du contenu...', 'assistant');
-      this.showTypingIndicator();
-      
-      try {
-        const content = await this.fetchWebpage(urlMatch[0]);
-        const summary = await this.summarizeContent(content, message);
-        this.hideTypingIndicator();
-        this.addChatMessage(summary, 'assistant');
-        
-        // Save as reference
-        if (this.currentProject) {
-          this.projectData.refs.push({
-            title: message.substring(0, 50),
-            source: urlMatch[0],
-            content: summary.substring(0, 500)
-          });
-          await this.saveProject();
-          this.populateRefs();
-          this.updateTabCounts();
-        }
-      } catch (e) {
-        this.hideTypingIndicator();
-        this.addChatMessage(`❌ Impossible d'accéder à cette page: ${e.message}`, 'assistant');
-      }
-    } else {
-      // Regular AI request
-      await this.callAI(message);
-    }
-  }
-  
-  async fetchWebpage(url) {
-    try {
-      const response = await fetch(url);
-      const html = await response.text();
-      
-      // Extract text content (basic)
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      
-      // Remove scripts and styles
-      doc.querySelectorAll('script, style, nav, header, footer, aside').forEach(el => el.remove());
-      
-      // Get main content
-      const main = doc.querySelector('main, article, .content, #content') || doc.body;
-      const text = main.textContent.replace(/\s+/g, ' ').trim();
-      
-      return text.substring(0, 8000);
-    } catch (e) {
-      throw new Error('Page inaccessible (CORS ou réseau)');
-    }
-  }
-  
-  async summarizeContent(content, query) {
-    const prompt = `Tu es un assistant de recherche. L'utilisateur veut des informations sur: "${query}"
 
-Voici le contenu d'une page web:
-${content}
-
-Résume les informations pertinentes en français. Extrait les faits clés, dates, chiffres. Format clair avec bullet points.`;
-
-    if (this.settings.apiProvider === 'openai') {
-      return await this.callOpenAI(prompt, content);
-    } else if (this.settings.apiProvider === 'anthropic') {
-      return await this.callAnthropic(prompt, content);
-    }
-    return 'Configure une clé API pour résumer le contenu.';
-  }
-  
-  async callAI(message) {
-    if (!this.settings.hasApiKey || this.settings.apiProvider === 'manual') {
-      this.hideTypingIndicator();
-      this.addChatMessage('⚠️ Configure une clé API dans les paramètres (⚙️).', 'assistant');
-      return;
-    }
-    
-    try {
-      const prompt = this.getAgentPrompt();
-      let response;
-      
-      if (this.settings.apiProvider === 'openai') {
-        response = await this.callOpenAI(prompt, message);
-      } else {
-        response = await this.callAnthropic(prompt, message);
-      }
-      
-      this.hideTypingIndicator();
-      this.addChatMessage(response, 'assistant');
-      
-    } catch (error) {
-      this.hideTypingIndicator();
-      this.addChatMessage(`❌ Erreur: ${error.message}`, 'assistant');
-    }
-  }
-  
-  async callOpenAI(systemPrompt, userMessage) {
-    return this.callProvider('openai', systemPrompt, userMessage);
-  }
-  
-  async callAnthropic(systemPrompt, userMessage) {
-    return this.callProvider('anthropic', systemPrompt, userMessage);
-  }
-  
-  // L'appel réseau se fait dans le main process : la clé API n'est jamais dans le renderer
-  async callProvider(provider, systemPrompt, userMessage) {
-    // Nettoyer les caractères problématiques
-    const cleanText = (text) => {
-      if (!text) return '';
-      return String(text)
-        .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '') // Control chars
-        .replace(/\r\n/g, '\n')  // Normalize line endings
-        .replace(/\r/g, '\n');
-    };
-    
-    const result = await window.api.aiChat(provider, cleanText(systemPrompt), cleanText(userMessage));
+  // Appel IA simple (analyse des notes) ; fournisseur et modèle viennent des paramètres
+  async callProvider(systemPrompt, userMessage) {
+    const cleanText = (text) => String(text || '')
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+      .replace(/\r\n?/g, '\n');
+    const requestId = window.PartnerStore.newId('rq');
+    const result = await window.api.aiChat(requestId, {
+      system: cleanText(systemPrompt),
+      messages: [{ role: 'user', content: cleanText(userMessage) }]
+    });
     if (!result.success) {
       throw new Error(result.error || 'Erreur API inconnue');
     }
     return result.text;
   }
-  
-  getAgentPrompt() {
-    const projectContext = this.currentProject 
-      ? `\n\nProjet actuel: ${this.projectData.title}\nPersonnages: ${this.projectData.characters.map(c => c.name).join(', ') || 'aucun'}`
-      : '';
-    
-    const prompts = {
-      'writing-partner': `Tu es le Writing Partner, partenaire d'écriture créative pour mangas et scénarios.
-Tu aides à écrire, développer des idées, donner du feedback constructif.
-Tu réponds TOUJOURS en français.${projectContext}`,
 
-      'world-builder': `Tu es le World-Builder, expert en construction d'univers fictifs.
-Tu crées des lieux, systèmes (magie/tech), cultures, créatures cohérents.
-Tu réponds en français.${projectContext}`,
-
-      'veilleur': `Tu es le Veilleur, agent de recherche et veille.
-Tu recherches des informations, vérifies des faits, trouves des références.
-Tu résumes les informations de manière claire et structurée.
-Tu réponds en français.${projectContext}`,
-
-      'planificateur': `Tu es le Planificateur, architecte narratif.
-Tu gères la structure en arcs et chapitres, timeline, pacing.
-Tu crées des plans clairs.
-Tu réponds en français.${projectContext}`
-    };
-    
-    return prompts[this.currentAgent] || prompts['writing-partner'];
-  }
-  
-  addChatMessage(content, role) {
+  // Avis de l'atelier (erreurs, résultats d'analyse) affichés dans le panneau, non enregistrés
+  addChatMessage(content, role = 'info') {
     const container = document.getElementById('chatMessages');
     const div = document.createElement('div');
-    div.className = `chat-message ${role}`;
-    
+    const kind = role === 'error' || /^❌/.test(content) ? 'error' : role === 'user' ? 'action' : 'info';
+    div.className = `chat-notice ${kind}`;
+    div.setAttribute('role', kind === 'error' ? 'alert' : 'status');
     const time = new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
-    
-    div.innerHTML = `
-      <div class="message-content">${this.escapeHtml(content).replace(/\n/g, '<br>')}</div>
-      <div class="message-time">${time}</div>
-    `;
-    
+    div.innerHTML = `<span class="notice-time">${time}</span> ${this.escapeHtml(content).replace(/\n/g, '<br>')}`;
+    container.querySelector('.partner-empty')?.remove();
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
   }
-  
+
   showTypingIndicator() {
-    const container = document.getElementById('chatMessages');
-    const indicator = document.createElement('div');
-    indicator.className = 'chat-message assistant typing';
-    indicator.innerHTML = '<div class="typing-indicator"><span></span><span></span><span></span></div>';
-    container.appendChild(indicator);
-    container.scrollTop = container.scrollHeight;
+    this.partner?.showTyping(true);
   }
-  
+
   hideTypingIndicator() {
-    const typing = document.querySelector('.typing');
-    if (typing) typing.remove();
+    this.partner?.showTyping(false);
   }
-  
+
   escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
@@ -3817,69 +3741,133 @@ Tu réponds en français.${projectContext}`
     document.getElementById('btnSettings').addEventListener('click', () => this.openSettings());
   }
   
+  // Fournisseur actif, puis une clé et un modèle par fournisseur. Les clés saisies partent
+  // directement au main process (chiffrées) ; aucune clé enregistrée n'est relue ici.
   async openSettings() {
     const current = await window.api.getSettings();
-    
+    const paths = await window.api.getPaths();
+    const esc = (s) => this.escapeHtml(s ?? '');
+    const providerIds = Object.keys(current.providers);
+
     const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:9999;';
-    
+    overlay.className = 'dialog-overlay';
     overlay.innerHTML = `
-      <div style="background:var(--bg-secondary);padding:24px;border-radius:12px;min-width:400px;max-width:500px;">
-        <h3 style="margin:0 0 20px 0;color:var(--text-primary);">⚙️ Paramètres</h3>
-        
-        <div style="margin-bottom:16px;">
-          <label style="display:block;color:var(--text-secondary);font-size:13px;margin-bottom:6px;">Fournisseur IA</label>
-          <select id="settingsProvider" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);">
-            <option value="openai" ${current.apiProvider === 'openai' ? 'selected' : ''}>OpenAI (GPT-4)</option>
-            <option value="anthropic" ${current.apiProvider === 'anthropic' ? 'selected' : ''}>Anthropic (Claude)</option>
-            <option value="manual" ${current.apiProvider === 'manual' ? 'selected' : ''}>Manuel</option>
-          </select>
-        </div>
-        
-        <div style="margin-bottom:16px;">
-          <label style="display:block;color:var(--text-secondary);font-size:13px;margin-bottom:6px;">Clé API</label>
-          <input type="password" id="settingsApiKey" value="" placeholder="${current.hasApiKey ? '•••••••• clé enregistrée (laisser vide pour la garder)' : 'sk-...'}" autocomplete="off" 
-            style="width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);box-sizing:border-box;">
-        </div>
-        
-        <div style="margin-bottom:20px;">
-          <label style="display:block;color:var(--text-secondary);font-size:13px;margin-bottom:6px;">Thème</label>
-          <select id="settingsTheme" style="width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);">
+      <div class="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+        <h3 id="settingsTitle">Paramètres</h3>
+
+        <div class="setting-group">
+          <label for="settingsTheme">Thème</label>
+          <select id="settingsTheme">
             <option value="dark" ${current.theme === 'dark' ? 'selected' : ''}>Sombre</option>
             <option value="light" ${current.theme === 'light' ? 'selected' : ''}>Clair</option>
           </select>
         </div>
-        
-        <div style="display:flex;gap:8px;justify-content:flex-end;">
-          <button id="settingsCancel" style="padding:10px 20px;border:none;border-radius:6px;background:var(--bg-tertiary);color:var(--text-secondary);cursor:pointer;">Annuler</button>
-          <button id="settingsSave" style="padding:10px 20px;border:none;border-radius:6px;background:var(--accent);color:white;cursor:pointer;">Sauvegarder</button>
+
+        <div class="setting-group">
+          <label for="settingsProvider">Partenaire IA</label>
+          <select id="settingsProvider">
+            <option value="none" ${current.apiProvider === 'none' ? 'selected' : ''}>Aucun (écriture seule, sans réseau)</option>
+            ${providerIds.map(id => `<option value="${esc(id)}" ${current.apiProvider === id ? 'selected' : ''}>${esc(current.providers[id].label)}</option>`).join('')}
+          </select>
+        </div>
+
+        ${providerIds.map(id => {
+          const p = current.providers[id];
+          return `
+        <fieldset class="setting-provider" data-provider="${esc(id)}">
+          <legend>${esc(p.label)}</legend>
+          <label for="key-${esc(id)}">Clé API</label>
+          <input type="password" id="key-${esc(id)}" autocomplete="off"
+            placeholder="${p.hasApiKey ? 'Clé enregistrée — laisser vide pour la garder' : 'Aucune clé enregistrée'}">
+          ${p.hasApiKey ? `<label class="setting-inline"><input type="checkbox" id="clear-${esc(id)}"> Effacer la clé enregistrée</label>` : ''}
+          <label for="model-${esc(id)}">Modèle</label>
+          <div class="setting-row">
+            <input type="text" id="model-${esc(id)}" list="models-${esc(id)}" value="${esc(p.model)}" spellcheck="false"
+              placeholder="${p.defaultModel ? esc(p.defaultModel) : 'Choisir dans la liste du service'}">
+            <datalist id="models-${esc(id)}"></datalist>
+            <button class="btn-secondary btn-small" data-list-models="${esc(id)}" ${p.hasApiKey ? '' : 'disabled title="Enregistre d\'abord une clé"'}>Modèles disponibles</button>
+          </div>
+          <p class="setting-help" id="help-${esc(id)}">${p.defaultModel ? `Par défaut : ${esc(p.defaultModel)}.` : 'Aucun modèle par défaut : choisis-en un parmi ceux que ton compte propose.'}</p>
+        </fieldset>`;
+        }).join('')}
+
+        <div class="setting-group">
+          <label for="settingsProjectsPath">Dossier des projets</label>
+          <input type="text" id="settingsProjectsPath" readonly value="${esc(paths.projects)}">
+        </div>
+
+        <p class="setting-error hidden" id="settingsError" role="alert"></p>
+        <div class="dialog-actions">
+          <button class="btn-secondary" id="settingsCancel">Annuler</button>
+          <button class="btn-primary" id="settingsSave">Enregistrer</button>
         </div>
       </div>
     `;
-    
+
+    const previousFocus = document.activeElement;
     document.body.appendChild(overlay);
-    
-    overlay.querySelector('#settingsCancel').onclick = () => overlay.remove();
+    const close = () => {
+      overlay.remove();
+      if (previousFocus && previousFocus.focus) previousFocus.focus();
+    };
+    overlay.querySelector('#settingsProvider').focus();
+    overlay.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') close();
+      // Garder le focus dans le dialogue
+      if (e.key === 'Tab') {
+        const focusables = [...overlay.querySelectorAll('button:not([disabled]), input:not([disabled]), select')];
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    });
+
+    overlay.querySelectorAll('[data-list-models]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.listModels;
+        const help = overlay.querySelector(`#help-${id}`);
+        btn.disabled = true;
+        help.textContent = 'Interrogation du service…';
+        const result = await window.api.aiListModels(id);
+        btn.disabled = false;
+        if (!result.success) {
+          help.textContent = `Liste indisponible : ${result.error}`;
+          return;
+        }
+        overlay.querySelector(`#models-${id}`).innerHTML = result.models
+          .map(m => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
+        help.textContent = `${result.models.length} modèle${result.models.length > 1 ? 's' : ''} disponible${result.models.length > 1 ? 's' : ''} : clique dans le champ Modèle pour choisir.`;
+      });
+    });
+
+    overlay.querySelector('#settingsCancel').onclick = close;
     overlay.querySelector('#settingsSave').onclick = async () => {
-      const newSettings = {
+      const providers = {};
+      providerIds.forEach(id => {
+        providers[id] = {
+          apiKey: overlay.querySelector(`#key-${id}`).value,
+          model: overlay.querySelector(`#model-${id}`).value,
+          clearApiKey: Boolean(overlay.querySelector(`#clear-${id}`)?.checked)
+        };
+      });
+      const update = {
+        theme: overlay.querySelector('#settingsTheme').value,
         apiProvider: overlay.querySelector('#settingsProvider').value,
-        apiKey: overlay.querySelector('#settingsApiKey').value,
-        theme: overlay.querySelector('#settingsTheme').value
+        providers
       };
-      
-      const result = await window.api.saveSettings(newSettings);
+      const result = await window.api.saveSettings(update);
       if (!result.success) {
-        this.addChatMessage(`❌ ${result.error}`, 'assistant');
+        const error = overlay.querySelector('#settingsError');
+        error.textContent = `Paramètres non enregistrés : ${result.error}`;
+        error.classList.remove('hidden');
         return;
       }
-      this.settings = {
-        apiProvider: newSettings.apiProvider,
-        theme: newSettings.theme,
-        hasApiKey: result.hasApiKey
-      };
-      this.applyTheme(newSettings.theme);
-      overlay.remove();
-      this.addChatMessage('✓ Paramètres sauvegardés !', 'assistant');
+      this.settings = result.settings;
+      this.applyTheme(result.settings.theme);
+      close();
+      this.partner.render();
+      this.addChatMessage('Paramètres enregistrés.', 'info');
     };
   }
 }

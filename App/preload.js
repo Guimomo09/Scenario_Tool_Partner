@@ -7,6 +7,9 @@ contextBridge.exposeInMainWorld('api', {
   writeFile: (filePath, content) => ipcRenderer.invoke('write-file', filePath, content),
   listProjects: () => ipcRenderer.invoke('list-projects'),
   createProject: (name) => ipcRenderer.invoke('create-project', name),
+  migrateProject: (projectPath, content, options) => ipcRenderer.invoke('migrate-project', projectPath, content, options),
+  listProjectBackups: (projectPath) => ipcRenderer.invoke('list-project-backups', projectPath),
+  restoreProjectBackup: (projectPath, backupName) => ipcRenderer.invoke('restore-project-backup', projectPath, backupName),
   listFiles: (dirPath) => ipcRenderer.invoke('list-files', dirPath),
   getPaths: () => ipcRenderer.invoke('get-paths'),
 
@@ -14,8 +17,10 @@ contextBridge.exposeInMainWorld('api', {
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
 
-  // IA (la clé reste dans le main process)
-  aiChat: (provider, systemPrompt, userMessage) => ipcRenderer.invoke('ai-chat', provider, systemPrompt, userMessage),
+  // IA (les clés restent dans le main process ; fournisseur et modèle viennent des paramètres)
+  aiChat: (requestId, payload) => ipcRenderer.invoke('ai-chat', requestId, payload),
+  aiCancel: (requestId) => ipcRenderer.invoke('ai-cancel', requestId),
+  aiListModels: (provider) => ipcRenderer.invoke('ai-list-models', provider),
 
   // Utilities
   createDirectory: (dirPath) => ipcRenderer.invoke('create-directory', dirPath),
@@ -27,9 +32,11 @@ contextBridge.exposeInMainWorld('api', {
   // Menu events
   onMenuNew: (callback) => ipcRenderer.on('menu-new', callback),
   onMenuSave: (callback) => ipcRenderer.on('menu-save', callback),
+  onMenuRestoreBackup: (callback) => ipcRenderer.on('menu-restore-backup', callback),
   onToggleFocus: (callback) => ipcRenderer.on('toggle-focus', callback),
   onToggleTheme: (callback) => ipcRenderer.on('toggle-theme', callback),
-  onOpenAgent: (callback) => ipcRenderer.on('open-agent', (event, agent) => callback(agent)),
+  onTogglePartner: (callback) => ipcRenderer.on('toggle-partner', callback),
+  onPartnerIntent: (callback) => ipcRenderer.on('partner-intent', (event, intent) => callback(intent)),
   onShowShortcuts: (callback) => ipcRenderer.on('show-shortcuts', callback),
 
   // Platform info

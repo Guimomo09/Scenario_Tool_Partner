@@ -4,15 +4,14 @@
 // Chargé dans le renderer via <script> et dans les tests via require().
 
 (function (root, factory) {
-  const api = factory();
   if (typeof module === 'object' && module.exports) {
-    module.exports = api;
+    module.exports = factory(require('./schema'));
   } else {
-    root.ProjectModel = api;
+    root.ProjectModel = factory(root.ProjectSchema);
   }
-})(typeof self !== 'undefined' ? self : this, function () {
+})(typeof self !== 'undefined' ? self : this, function (Schema) {
 
-  const COLLECTIONS = ['script', 'sequences', 'characters', 'places', 'systems', 'timeline', 'refs', 'todos'];
+  const COLLECTIONS = Schema.COLLECTIONS;
 
   const normalize = (value) => String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 
@@ -70,8 +69,31 @@
     return { list, added, updated };
   }
 
-  // Une page re-extraite des notes remplace son contenu dérivé, les autres pages restent intactes
-  const mergeDerivedPage = (existing, incoming) => ({ ...existing, ...incoming });
+  // Une page re-extraite des notes remplace son contenu dérivé, les autres pages restent intactes.
+  // Son identifiant stable est conservé.
+  const mergeDerivedPage = (existing, incoming) => ({ ...existing, ...incoming, id: existing.id ?? incoming.id });
+
+  // Une séquence re-extraite garde aussi les pages qu'elle avait déjà
+  const mergeDerivedSequence = (existing, incoming) => {
+    const merged = mergeDerivedPage(existing, incoming);
+    if (Array.isArray(existing.pages) || Array.isArray(incoming.pages)) {
+      merged.pages = [...new Set([...(existing.pages || []), ...(incoming.pages || [])])].sort((a, b) => a - b);
+    }
+    return merged;
+  };
+
+  // Les rôles proposés par une extraction (IA, parseur) restent des suggestions à confirmer
+  function rolesAsSuggestions(updates, source) {
+    if (!updates.character_updates?.length) return updates;
+    return {
+      ...updates,
+      character_updates: updates.character_updates.map(c => {
+        if (isEmpty(c.role)) return c;
+        const { role, ...rest } = c;
+        return { ...rest, suggestedRole: role, suggestionSource: source };
+      })
+    };
+  }
 
   function sanitizeCharacter(u) {
     const name = String(u.name || '').trim();
@@ -123,7 +145,7 @@
       record('script', result);
     }
     if (updates.sequences?.length) {
-      record('sequences', mergeByKey(data.sequences, updates.sequences, s => String(s.number), mergeDerivedPage));
+      record('sequences', mergeByKey(data.sequences, updates.sequences, s => String(s.number), mergeDerivedSequence));
     }
     if (updates.character_updates?.length) {
       const incoming = updates.character_updates.map(sanitizeCharacter).filter(Boolean);
@@ -149,8 +171,14 @@
     if (updates.worldContext) data.worldContext = updates.worldContext;
     if (updates.narrativeClues) data.narrativeClues = updates.narrativeClues;
 
+    // Les nouveaux éléments reçoivent un identifiant stable ; les existants gardent le leur
+    // (copie des éléments sans id : le projet d'origine n'est jamais modifié)
+    COLLECTIONS.forEach(c => {
+      data[c] = data[c].map(item => (isObject(item) && (item.id === undefined || item.id === null) ? { ...item } : item));
+    });
+    Schema.ensureIds(data);
     return { data, summary };
   }
 
-  return { applyUpdates, validateUpdates, mergeByKey, mergeFields, normalize };
+  return { applyUpdates, validateUpdates, rolesAsSuggestions, mergeByKey, mergeFields, normalize };
 });

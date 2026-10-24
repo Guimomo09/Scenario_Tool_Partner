@@ -27,6 +27,66 @@ function atomicWriteFile(filePath, content) {
   }
 }
 
+// Sauvegardes datées de _PROJECT.json (avant migration ou restauration), jamais écrasées
+const BACKUP_RE = /^_PROJECT\.backup-[a-z0-9-]+-\d{8}-\d{6}(?:-\d+)?\.json$/i;
+
+function timestamp(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-` +
+    `${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+// Copie `filePath` vers une sauvegarde datée unique ; échoue plutôt que d'écraser une sauvegarde
+function createBackup(filePath, label) {
+  const dir = path.dirname(filePath);
+  const base = `_PROJECT.backup-${label}-${timestamp()}`;
+  for (let n = 0; n < 100; n++) {
+    const name = n ? `${base}-${n}.json` : `${base}.json`;
+    const backupPath = path.join(dir, name);
+    try {
+      fs.copyFileSync(filePath, backupPath, fs.constants.COPYFILE_EXCL);
+      if (fs.readFileSync(backupPath, 'utf-8') !== fs.readFileSync(filePath, 'utf-8')) {
+        throw new Error('La sauvegarde ne correspond pas au fichier d\'origine.');
+      }
+      return backupPath;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+  }
+  throw new Error('Impossible de créer une sauvegarde unique.');
+}
+
+// Sauvegarde puis écrit le nouveau contenu ; vérifie l'écriture en relisant le fichier
+function writeWithBackup(filePath, content, label) {
+  const backupPath = createBackup(filePath, label);
+  atomicWriteFile(filePath, content);
+  if (fs.readFileSync(filePath, 'utf-8') !== content) {
+    throw new Error(`Écriture non vérifiée. La version précédente est dans ${path.basename(backupPath)}.`);
+  }
+  return backupPath;
+}
+
+function listBackups(projectDir) {
+  return fs.readdirSync(projectDir)
+    .filter(name => BACKUP_RE.test(name))
+    .sort()
+    .reverse();
+}
+
+// Restaure une sauvegarde : la version actuelle est elle-même sauvegardée avant
+function restoreBackup(projectDir, backupName) {
+  if (!BACKUP_RE.test(String(backupName)) || path.basename(backupName) !== backupName) {
+    throw new Error('Nom de sauvegarde invalide.');
+  }
+  const backupPath = path.join(projectDir, backupName);
+  const content = fs.readFileSync(backupPath, 'utf-8');
+  JSON.parse(content);
+  const filePath = path.join(projectDir, '_PROJECT.json');
+  const safetyCopy = fs.existsSync(filePath) ? writeWithBackup(filePath, content, 'avant-restauration') : null;
+  if (!safetyCopy) atomicWriteFile(filePath, content);
+  return { restored: backupName, safetyCopy: safetyCopy && path.basename(safetyCopy) };
+}
+
 // Nom de projet utilisable comme nom de dossier (pas de séparateur, pas de nom réservé)
 function validateProjectName(name) {
   const trimmed = String(name || '').trim();
@@ -38,4 +98,7 @@ function validateProjectName(name) {
   return null;
 }
 
-module.exports = { isPathInside, atomicWriteFile, validateProjectName };
+module.exports = {
+  isPathInside, atomicWriteFile, validateProjectName,
+  createBackup, writeWithBackup, listBackups, restoreBackup
+};

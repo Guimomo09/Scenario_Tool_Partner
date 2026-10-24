@@ -1362,6 +1362,28 @@ body.focus-mode .sidebar-right {
   font-style: italic;
 }
 
+/* Ligne non classée par le parseur, affichée telle quelle */
+.manga-unknown {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  border-left: 2px solid var(--border-color, currentColor);
+  padding-left: 8px;
+}
+
+.suggestion-tag {
+  font-style: italic;
+  opacity: 0.8;
+  border-style: dashed;
+}
+
+.dup-tag {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: 6px;
+}
+
 .manga-indication {
   font-size: 12px;
   color: var(--text-muted);
