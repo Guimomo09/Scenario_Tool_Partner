@@ -1,0 +1,58 @@
+{
+  "name": "writing-partner",
+  "version": "1.0.0",
+  "description": "Atelier d'écriture créative avec agents IA",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux",
+    "test": "node --test test/*.test.js"
+  },
+  "keywords": [
+    "writing",
+    "creative",
+    "ai",
+    "manga",
+    "scenario"
+  ],
+  "author": "Charles",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1"
+  },
+  "dependencies": {
+    "marked": "^11.0.0",
+    "highlight.js": "^11.9.0"
+  },
+  "build": {
+    "appId": "com.partner.writing",
+    "productName": "Writing Partner",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "lib/**/*",
+      "src/**/*",
+      "assets/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "assets/icon.icns"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/icon.png"
+    }
+  }
+}

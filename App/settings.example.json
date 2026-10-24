@@ -1,0 +1,5 @@
+{
+  "theme": "dark",
+  "apiProvider": "openai",
+  "apiKeyEnc": "<généré par l'app — clé chiffrée via Electron safeStorage>"
+}

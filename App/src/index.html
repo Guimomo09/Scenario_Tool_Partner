@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self' https://api.openai.com https://api.anthropic.com https://*">
+  <title>Writing Partner</title>
+  <link rel="stylesheet" href="styles/main.css">
+  <link rel="stylesheet" href="styles/editor.css">
+  <link rel="stylesheet" href="styles/agents.css">
+</head>
+<body class="theme-dark">
+  
+  <!-- Barre de titre -->
+  <div class="titlebar">
+    <div class="titlebar-drag">
+      <span class="app-title">Writing Partner</span>
+      <span class="project-name" id="currentProjectName">Aucun projet</span>
+    </div>
+  </div>
+
+  <!-- Container principal -->
+  <div class="app-container">
+    
+    <!-- Sidebar gauche - Projet -->
+    <aside class="sidebar sidebar-left" id="sidebarLeft">
+      <!-- Sélecteur de projet -->
+      <div class="project-selector">
+        <select id="projectSelect">
+          <option value="">— Sélectionner un projet —</option>
+        </select>
+        <button class="btn-icon" id="btnNewProject" title="Nouveau projet">+</button>
+      </div>
+      
+      <!-- Onglets du projet (apparaît quand projet sélectionné) -->
+      <div class="project-tabs hidden" id="projectTabs">
+        <button class="project-tab active" data-tab="scenario" title="Scénario">
+          📜 <span>Scénario</span>
+        </button>
+        <button class="project-tab" data-tab="characters" title="Personnages">
+          👤 <span>Personnages</span>
+          <span class="tab-count" id="countCharacters">0</span>
+        </button>
+        <button class="project-tab" data-tab="places" title="Lieux">
+          🗺️ <span>Lieux</span>
+          <span class="tab-count" id="countPlaces">0</span>
+        </button>
+        <button class="project-tab" data-tab="systems" title="Systèmes">
+          ⚔️ <span>Systèmes</span>
+          <span class="tab-count" id="countSystems">0</span>
+        </button>
+        <button class="project-tab" data-tab="timeline" title="Timeline">
+          🕐 <span>Timeline</span>
+          <span class="tab-count" id="countTimeline">0</span>
+        </button>
+        <button class="project-tab" data-tab="refs" title="Références">
+          📚 <span>Références</span>
+          <span class="tab-count" id="countRefs">0</span>
+        </button>
+        <button class="project-tab" data-tab="todos" title="À faire">
+          🔴 <span>À traiter</span>
+          <span class="tab-count tab-count-warning" id="countTodos">0</span>
+        </button>
+      </div>
+      
+      <!-- Contenu des onglets -->
+      <div class="project-content" id="projectContent">
+        <!-- Panneau Scénario (structure) -->
+        <div class="project-panel active" id="panel-scenario">
+          <div class="panel-header">
+            <h3>Structure du Scénario</h3>
+          </div>
+          <div class="scenario-outline" id="scenarioOutline">
+            <p class="empty-state">Sélectionne un projet pour voir sa structure</p>
+          </div>
+        </div>
+        
+        <!-- Panneau Personnages -->
+        <div class="project-panel" id="panel-characters">
+          <div class="panel-header">
+            <h3>Personnages</h3>
+            <button class="btn-icon btn-add-item" data-type="character" disabled title="Ajout manuel pas encore disponible">+</button>
+          </div>
+          <div class="item-list" id="characterList">
+            <p class="empty-state">Aucun personnage</p>
+          </div>
+        </div>
+        
+        <!-- Panneau Lieux -->
+        <div class="project-panel" id="panel-places">
+          <div class="panel-header">
+            <h3>Lieux</h3>
+            <button class="btn-icon btn-add-item" data-type="place" disabled title="Ajout manuel pas encore disponible">+</button>
+          </div>
+          <div class="item-list" id="placesList">
+            <p class="empty-state">Aucun lieu</p>
+          </div>
+        </div>
+        
+        <!-- Panneau Systèmes -->
+        <div class="project-panel" id="panel-systems">
+          <div class="panel-header">
+            <h3>Systèmes</h3>
+            <button class="btn-icon btn-add-item" data-type="system" disabled title="Ajout manuel pas encore disponible">+</button>
+          </div>
+          <div class="item-list" id="systemsList">
+            <p class="empty-state">Aucun système</p>
+          </div>
+        </div>
+        
+        <!-- Panneau Timeline -->
+        <div class="project-panel" id="panel-timeline">
+          <div class="panel-header">
+            <h3>Timeline</h3>
+          </div>
+          <div class="timeline-list" id="timelineList">
+            <p class="empty-state">Aucun événement</p>
+          </div>
+        </div>
+        
+        <!-- Panneau Références -->
+        <div class="project-panel" id="panel-refs">
+          <div class="panel-header">
+            <h3>Références & Recherches</h3>
+            <button class="btn-icon" id="btnAddRef" disabled title="Ajout manuel pas encore disponible">+</button>
+          </div>
+          <div class="refs-list" id="refsList">
+            <p class="empty-state">Aucune référence</p>
+          </div>
+        </div>
+        
+        <!-- Panneau À traiter (zones d'ombre) -->
+        <div class="project-panel" id="panel-todos">
+          <div class="panel-header">
+            <h3>🔴 À Traiter</h3>
+          </div>
+          <div class="todos-list" id="todosList">
+            <p class="empty-state">Aucun point en suspens</p>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Zone principale - Double Éditeur -->
+    <main class="editor-area">
+      <!-- Barre d'outils -->
+      <div class="editor-toolbar">
+        <div class="toolbar-group">
+          <button class="toolbar-btn editor-mode-btn active" data-mode="split" title="Vue double">⧉</button>
+          <button class="toolbar-btn editor-mode-btn" data-mode="notes" title="Notes seulement">📝</button>
+          <button class="toolbar-btn editor-mode-btn" data-mode="script" title="Scénario seulement">📜</button>
+        </div>
+        <div class="toolbar-separator"></div>
+        <div class="toolbar-group">
+          <button class="toolbar-btn" data-action="bold" title="Gras"><b>B</b></button>
+          <button class="toolbar-btn" data-action="italic" title="Italique"><i>I</i></button>
+          <button class="toolbar-btn" data-action="heading" title="Titre">H</button>
+          <button class="toolbar-btn" data-action="todo" title="Marquer à traiter">🔴</button>
+        </div>
+        <div class="toolbar-spacer"></div>
+        <div class="toolbar-group">
+          <button class="toolbar-btn" id="btnImport" title="Importer une Story Bible (.md)">📥 Import</button>
+          <button class="toolbar-btn" id="btnSync" title="Analyser les notes et compléter le projet (rien n’est supprimé)">🔄 Analyser</button>
+        </div>
+        <div class="toolbar-group">
+          <span class="word-count" id="wordCount">0 mots</span>
+        </div>
+      </div>
+      
+      <!-- Double éditeur -->
+      <div class="dual-editor" id="dualEditor">
+        <!-- Éditeur Notes (gauche) -->
+        <div class="editor-pane" id="notesPane">
+          <div class="pane-header">
+            <span class="pane-title">📝 Notes & Idées</span>
+            <span class="pane-hint">Écris ici tes idées à la volée (ex: "p45 héros crie en garde")</span>
+          </div>
+          <textarea class="editor" id="notesEditor" placeholder="Note tes idées ici...&#10;&#10;Exemples:&#10;- p45 héros fait demi-tour et crie &quot;en garde!&quot;&#10;- personnage: Marie a peur du noir&#10;- lieu: la grotte est humide et sombre&#10;- TODO: définir le motif du méchant"></textarea>
+        </div>
+        
+        <!-- Séparateur redimensionnable -->
+        <div class="editor-resizer" id="editorResizer"></div>
+        
+        <!-- Éditeur Scénario (droite) -->
+        <div class="editor-pane" id="scriptPane">
+          <div class="pane-header">
+            <span class="pane-title">📜 Scénario</span>
+            <span class="pane-hint">Vue d'ensemble • <span class="todo-indicator">🔴 zones à traiter en rouge</span></span>
+          </div>
+          <div class="script-view" id="scriptView">
+            <div class="script-content" id="scriptContent">
+              <p class="empty-state">Le scénario apparaîtra ici après synchronisation</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="editor-statusbar">
+        <span id="saveStatus" role="status" aria-live="polite">Enregistré</span>
+        <span id="syncStatus">Non analysé</span>
+      </div>
+    </main>
+
+    <!-- Sidebar droite - Agents IA -->
+    <aside class="sidebar sidebar-right" id="sidebarRight">
+      <div class="agents-header">
+        <h3>Agents</h3>
+        <button class="btn-icon" id="btnSettings" title="Paramètres">⚙</button>
+      </div>
+      
+      <div class="agents-list">
+        <button class="agent-btn active" data-agent="writing-partner">
+          <span class="agent-icon">✍️</span>
+          <span class="agent-name">Writing Partner</span>
+        </button>
+        <button class="agent-btn" data-agent="world-builder">
+          <span class="agent-icon">🌍</span>
+          <span class="agent-name">World-Builder</span>
+        </button>
+        <button class="agent-btn" data-agent="veilleur">
+          <span class="agent-icon">🔍</span>
+          <span class="agent-name">Veilleur</span>
+        </button>
+        <button class="agent-btn" data-agent="planificateur">
+          <span class="agent-icon">📋</span>
+          <span class="agent-name">Planificateur</span>
+        </button>
+      </div>
+      
+      <div class="chat-area">
+        <div class="chat-messages" id="chatMessages">
+          <div class="chat-welcome">
+            <h4>👋 Bienvenue !</h4>
+            <p>Sélectionne un agent pour t'aider.</p>
+            <div class="quick-actions">
+              <button class="quick-action quick-action-highlight" data-action="sync">🔄 Analyser les notes</button>
+              <button class="quick-action" data-action="feedback">📊 Feedback</button>
+              <button class="quick-action" data-action="questions">❓ Questions</button>
+              <button class="quick-action" data-action="research">🔍 Rechercher</button>
+            </div>
+          </div>
+        </div>
+        
+        <div class="chat-input-area">
+          <textarea class="chat-input" id="chatInput" placeholder="Écris ton message ou une URL à rechercher..." rows="3"></textarea>
+          <div class="chat-actions">
+            <button class="btn-icon" id="btnAttachText" title="Joindre le texte">📎</button>
+            <button class="btn-primary" id="btnSendChat">Envoyer</button>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Modal Paramètres -->
+  <div class="modal hidden" id="modalSettings">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Paramètres</h3>
+        <button class="btn-close" id="btnCloseSettings">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="setting-group">
+          <label>Thème</label>
+          <select id="settingTheme">
+            <option value="dark">Sombre</option>
+            <option value="light">Clair</option>
+          </select>
+        </div>
+        <div class="setting-group">
+          <label>Fournisseur IA</label>
+          <select id="settingApiProvider">
+            <option value="openai">OpenAI (GPT-4)</option>
+            <option value="anthropic">Anthropic (Claude)</option>
+            <option value="manual">Manuel (copier-coller)</option>
+          </select>
+        </div>
+        <div class="setting-group" id="apiKeyGroup">
+          <label>Clé API</label>
+          <input type="password" id="settingApiKey" placeholder="sk-...">
+          <p class="setting-help">
+            <a href="https://platform.openai.com/api-keys" target="_blank">Obtenir une clé OpenAI</a> |
+            <a href="https://console.anthropic.com/" target="_blank">Obtenir une clé Anthropic</a>
+          </p>
+        </div>
+        <div class="setting-group">
+          <label>Dossier Projets</label>
+          <input type="text" id="settingProjectsPath" readonly>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn-secondary" id="btnCancelSettings">Annuler</button>
+        <button class="btn-primary" id="btnSaveSettings">Sauvegarder</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Aide -->
+  <div class="modal hidden" id="modalHelp">
+    <div class="modal-content modal-large">
+      <div class="modal-header">
+        <h3>Raccourcis clavier</h3>
+        <button class="btn-close" id="btnCloseHelp" aria-label="Fermer l'aide">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="shortcuts-grid">
+          <div class="shortcut-category">
+            <h4>Projet</h4>
+            <div class="shortcut"><kbd>Ctrl+N</kbd> Nouveau projet</div>
+            <div class="shortcut"><kbd>Ctrl+S</kbd> Enregistrer maintenant</div>
+          </div>
+          <div class="shortcut-category">
+            <h4>Édition</h4>
+            <div class="shortcut"><kbd>Ctrl+Z</kbd> Annuler</div>
+            <div class="shortcut"><kbd>Ctrl+Y</kbd> Rétablir</div>
+          </div>
+          <div class="shortcut-category">
+            <h4>Agents</h4>
+            <div class="shortcut"><kbd>Ctrl+1</kbd> Writing Partner</div>
+            <div class="shortcut"><kbd>Ctrl+2</kbd> World-Builder</div>
+            <div class="shortcut"><kbd>Ctrl+3</kbd> Veilleur</div>
+            <div class="shortcut"><kbd>Ctrl+4</kbd> Planificateur</div>
+          </div>
+          <div class="shortcut-category">
+            <h4>Affichage</h4>
+            <div class="shortcut"><kbd>Ctrl+Shift+F</kbd> Mode focus</div>
+            <div class="shortcut"><kbd>Ctrl+Shift+T</kbd> Thème</div>
+            <div class="shortcut"><kbd>Ctrl+/</kbd> Cette aide</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="core/project-model.js"></script>
+  <script src="components/app.js"></script>
+</body>
+</html>

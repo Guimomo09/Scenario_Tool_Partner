@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#1a1a2e"/>
+      <stop offset="100%" style="stop-color:#16213e"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#e94560"/>
+      <stop offset="100%" style="stop-color:#ff6b6b"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Background -->
+  <rect width="512" height="512" rx="80" fill="url(#bg)"/>
+  
+  <!-- Pen/Quill -->
+  <path d="M380 100 L280 350 L250 380 L260 350 L360 100 Z" fill="url(#accent)"/>
+  <path d="M250 380 L230 430 L220 420 L240 370 Z" fill="#eaeaea"/>
+  
+  <!-- Lines representing text -->
+  <rect x="100" y="160" width="140" height="12" rx="6" fill="#3a3a5a"/>
+  <rect x="100" y="200" width="180" height="12" rx="6" fill="#3a3a5a"/>
+  <rect x="100" y="240" width="120" height="12" rx="6" fill="#3a3a5a"/>
+  <rect x="100" y="280" width="160" height="12" rx="6" fill="#3a3a5a"/>
+  <rect x="100" y="320" width="100" height="12" rx="6" fill="#3a3a5a"/>
+  
+  <!-- Star/Sparkle for AI -->
+  <circle cx="400" cy="400" r="8" fill="#fbbf24"/>
+  <circle cx="420" cy="380" r="5" fill="#fbbf24"/>
+  <circle cx="380" cy="420" r="5" fill="#fbbf24"/>
+</svg>

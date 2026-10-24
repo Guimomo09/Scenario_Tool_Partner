@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./App/settings.json)",
+      "Edit(./App/settings.json)",
+      "Read(./**/.env)",
+      "Read(./**/.env.*)",
+      "Read(./App/node_modules/**)"
+    ]
+  }
+}

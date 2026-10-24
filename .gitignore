@@ -1,0 +1,22 @@
+# Secrets
+App/settings.json
+.env
+.env.*
+!.env.example
+
+# Dépendances / build
+node_modules/
+App/dist/
+
+# Local Claude
+.claude/settings.local.json
+
+# Données d'écriture personnelles (dépôt public : jamais poussées)
+Projets/*
+!Projets/.gitkeep
+Inbox/NOTES.md
+Inbox/*.txt
+
+# Sauvegardes et écritures temporaires de l'app
+*.bak
+*.tmp-*
