@@ -62,6 +62,6 @@ Répondre et rédiger **en français** (l'utilisateur mélange FR/EN).
 - Tâches simples : modèle standard, effort moyen. Raisonnement poussé seulement si nécessaire.
 
 ## Git
-Pas encore de repo git. Si initialisé : `.gitignore` est prêt (exclut settings.json,
-node_modules, dist, .env). Commit/push uniquement sur demande, après vérif `git status`/`git diff`
-et absence de secret.
+Remote : https://github.com/Guimomo09/Scenario_Tool_Partner (**public**), branche `main`.
+Jamais versionnés : `Projets/*`, `Inbox/NOTES.md` (manuscrits), `settings.json`, `.bak`.
+Commit/push uniquement sur demande, après vérif `git status`/`git diff` et absence de secret.

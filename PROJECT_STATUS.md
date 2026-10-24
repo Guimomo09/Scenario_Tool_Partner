@@ -56,4 +56,5 @@ Refonte en cours selon le prompt validé
 - Stack conservée (Electron + JS vanilla), pas de framework.
 - Tests via `node:test` (aucune dépendance).
 - `.github/copilot-instructions.md` reste la source canonique des conventions d'écriture.
-- Sauvegarde pré-refonte (code + Projets/) dans le scratchpad de la session du 2026-10-25 (temporaire).
+- Git public (GitHub) : l'outil seulement, manuscrits exclus. Projets/ n'a donc PAS d'historique
+  git : sauvegarde à prévoir à part (OneDrive ou dépôt privé séparé).
