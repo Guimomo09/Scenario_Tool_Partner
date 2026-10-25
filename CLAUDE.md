@@ -46,6 +46,7 @@ Répondre et rédiger **en français** (l'utilisateur mélange FR/EN).
 ## Workflow
 - Installer : `cd App && npm install` (ou `App/Installer.bat`)
 - Lancer : `cd App && npm start` — dev avec DevTools : `npm run dev`
+- Lanceur utilisateur : raccourcis Bureau / menu Démarrer créés par `App/Creer-Raccourcis.ps1` (electron.exe direct, sans console)
 - Build : `npm run build:win`
 - Tests : `cd App && npm test` (`node:test`, fixtures fictives seulement, jamais les manuscrits)
 - Lancer Electron depuis le terminal VS Code : `env -u ELECTRON_RUN_AS_NODE npm start`

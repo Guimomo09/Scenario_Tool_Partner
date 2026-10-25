@@ -44,6 +44,8 @@ class WritingPartnerApp {
     this.undoTip = null;
     // Titres de section du document ouvert, pour faire suivre les scènes liées quand un titre change
     this.docHeadings = [];
+    // Passage ciblé : reste sélectionné pour le partenaire jusqu'à ce que l'auteur le retire
+    this.target = null; // { doc, start, end, text }
     
     // Init
     this.init();
@@ -642,6 +644,8 @@ class WritingPartnerApp {
     this.pendingMigration = null;
     this.undoStack = [];
     this.redoStack = [];
+    this.target = null;
+    this.renderTarget();
     this.projectData = this.getEmptyProjectData();
     document.getElementById('currentProjectName').textContent = 'Aucun projet';
     document.getElementById('todosNav').classList.add('hidden');
@@ -749,6 +753,7 @@ class WritingPartnerApp {
       this.onCursorMove();
       clearTimeout(this.headingTimer);
       this.headingTimer = setTimeout(() => this.trackHeadings(), 300);
+      this.relocateTarget();
 
       clearTimeout(this.notesSaveTimer);
       this.notesSaveTimer = setTimeout(() => this.flushNotes(), 2000);
@@ -756,6 +761,20 @@ class WritingPartnerApp {
 
     // Position et sélection : bandeau et contexte du partenaire
     ['keyup', 'mouseup', 'select', 'focus'].forEach(evt => notesEditor.addEventListener(evt, () => this.onCursorMove()));
+    ['mouseup', 'keyup', 'select'].forEach(evt => notesEditor.addEventListener(evt, () => this.pinSelection()));
+    notesEditor.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.target) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.clearTarget();
+      }
+    });
+    notesEditor.addEventListener('scroll', () => {
+      document.getElementById('editorBackdrop').scrollTop = notesEditor.scrollTop;
+    });
+    window.addEventListener('resize', () => this.renderTarget());
+    document.getElementById('btnTargetClear').addEventListener('click', () => this.clearTarget());
+    document.getElementById('btnTargetShow').addEventListener('click', () => this.showTarget());
 
     document.getElementById('documentsList').addEventListener('click', (e) => {
       const btn = e.target.closest('[data-doc]');
@@ -847,6 +866,8 @@ class WritingPartnerApp {
     this.renderDocumentsList();
     clearTimeout(this.headingTimer);
     this.docHeadings = window.PartnerContext.listSections(editor.value).map(sec => sec.title);
+    if (this.target && this.target.doc !== doc.name) this.clearTarget({ silent: true });
+    else this.renderTarget();
     this.updatePosition();
     this.partner.rememberDocument(doc.name, pos, { persist: flush });
     this.partner.refreshContext();
@@ -855,6 +876,78 @@ class WritingPartnerApp {
   }
 
   // Remplace une plage du document ouvert en gardant l'annulation (Ctrl+Z) ; vérifie le résultat
+  // === Passage ciblé ===
+  // Une sélection non vide devient le passage ciblé ; un clic ailleurs ne l'efface pas.
+  pinSelection() {
+    const editor = this.editor;
+    if (!this.currentDoc || editor.selectionEnd <= editor.selectionStart) return;
+    const text = editor.value.slice(editor.selectionStart, editor.selectionEnd);
+    if (!text.trim()) return;
+    const t = this.target;
+    if (t && t.doc === this.currentDoc.name && t.start === editor.selectionStart && t.end === editor.selectionEnd) return;
+    this.target = { doc: this.currentDoc.name, start: editor.selectionStart, end: editor.selectionEnd, text };
+    this.renderTarget();
+    this.partner.refreshContext();
+  }
+
+  // Plage envoyée au partenaire : le passage ciblé du document ouvert, sinon la sélection en cours
+  targetRange() {
+    if (this.target && this.target.doc === this.currentDoc?.name) return { start: this.target.start, end: this.target.end };
+    const editor = this.editor;
+    return editor.selectionEnd > editor.selectionStart ? { start: editor.selectionStart, end: editor.selectionEnd } : null;
+  }
+
+  relocateTarget() {
+    if (!this.target || this.target.doc !== this.currentDoc?.name) return;
+    const range = window.PartnerContext.relocate(this.editor.value, this.target);
+    if (!range) {
+      this.clearTarget({ silent: true });
+      this.addChatMessage('Le passage ciblé a été modifié : il n\'est plus ciblé. Surlignez-le de nouveau si besoin.', 'info');
+      return;
+    }
+    this.target = { ...this.target, ...range };
+    this.renderTarget();
+  }
+
+  clearTarget({ silent = false } = {}) {
+    if (!this.target) return;
+    this.target = null;
+    this.renderTarget();
+    if (!silent) this.partner.refreshContext();
+    else this.partner?.refreshContext();
+  }
+
+  showTarget() {
+    if (!this.target) return;
+    const editor = this.editor;
+    this.setWorkspace('write', { focus: false });
+    editor.focus();
+    editor.setSelectionRange(this.target.start, this.target.end);
+    const line = editor.value.slice(0, this.target.start).split('\n').length;
+    editor.scrollTop = Math.max(0, (line / editor.value.split('\n').length) * editor.scrollHeight - editor.clientHeight / 3);
+  }
+
+  // Surlignage dans le texte (calque sous la zone de saisie) et rappel dans le partenaire
+  renderTarget() {
+    const backdrop = document.getElementById('editorBackdrop');
+    const bar = document.getElementById('targetBar');
+    const t = this.target && this.target.doc === this.currentDoc?.name ? this.target : null;
+    if (!t) {
+      backdrop.textContent = '';
+      bar.classList.add('hidden');
+      return;
+    }
+    const value = this.editor.value;
+    const esc = (v) => this.escapeHtml(v);
+    // Le saut de ligne final garde la même hauteur que la zone de saisie
+    backdrop.innerHTML = `${esc(value.slice(0, t.start))}<mark>${esc(value.slice(t.start, t.end))}</mark>${esc(value.slice(t.end))}\n`;
+    backdrop.scrollTop = this.editor.scrollTop;
+    const words = t.text.trim().split(/\s+/).length;
+    const excerpt = t.text.trim().replace(/\s+/g, ' ');
+    document.getElementById('targetExcerpt').textContent = `« ${excerpt.length > 70 ? `${excerpt.slice(0, 70)}…` : excerpt} » · ${words} mot${words > 1 ? 's' : ''}`;
+    bar.classList.remove('hidden');
+  }
+
   replaceRange(start, end, text) {
     const editor = this.editor;
     if (editor.readOnly || !this.currentDoc) return false;

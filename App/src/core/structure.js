@@ -99,6 +99,14 @@
     return { data: withScenes(data, list.filter(s => s.id !== id)), removed: true };
   }
 
+  // Suppression groupée demandée par l'auteur : seules ces scènes disparaissent
+  function removeScenes(data, ids) {
+    const drop = new Set((ids || []).map(String));
+    const list = scenesOf(data);
+    const kept = list.filter(s => !drop.has(String(s.id)));
+    return kept.length === list.length ? { data, removed: 0 } : { data: withScenes(data, kept), removed: list.length - kept.length };
+  }
+
   // Personnages liés ; un identifiant qui ne correspond plus à aucune fiche est signalé, pas retiré
   function charactersOf(data, scene) {
     const byId = new Map((data.characters || []).filter(isObject).map(c => [String(c.id), c]));
@@ -231,7 +239,7 @@
 
   return {
     STATUSES, statusLabel, cleanFields, createScene,
-    addScene, updateScene, moveScene, moveSceneBy, removeScene,
+    addScene, updateScene, moveScene, moveSceneBy, removeScene, removeScenes,
     charactersOf, scenesForCharacter, sceneAt, followHeadingRename,
     groupSpreads, setPageSpread, pagesOfScene, speakersOfPage,
     proposeScenesFromSequences, proposeScenesFromHeadings

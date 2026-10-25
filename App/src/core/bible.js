@@ -164,6 +164,14 @@
     return { data: { ...data, [kind]: list.filter(e => !(isObject(e) && e.id === id)) }, removed: true };
   }
 
+  // Suppression groupée demandée par l'auteur (même effet que removeEntry sur chaque fiche)
+  function removeEntries(data, kind, ids) {
+    const drop = new Set((ids || []).map(String));
+    const list = listOf(data, kind);
+    const kept = list.filter(e => !(isObject(e) && drop.has(String(e.id))));
+    return kept.length === list.length ? { data, removed: 0 } : { data: { ...data, [kind]: kept }, removed: list.length - kept.length };
+  }
+
   // Le rôle suggéré (IA, parseur) devient le rôle, sur décision de l'auteur
   function confirmSuggestedRole(data, id) {
     const list = [...listOf(data, 'characters')];
@@ -193,6 +201,6 @@
 
   return {
     KINDS, identity, titleOf, parseValue, formatValue, isEditable,
-    addEntry, updateEntry, removeEntry, confirmSuggestedRole, findDuplicate, extraFields, search
+    addEntry, updateEntry, removeEntry, removeEntries, confirmSuggestedRole, findDuplicate, extraFields, search
   };
 });

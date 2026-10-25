@@ -177,7 +177,7 @@ class PartnerPanel {
       btn.setAttribute('aria-checked', String(active));
     });
     const info = window.PartnerContext.INTENTS[intent];
-    this.el.input.placeholder = `${info.label} — ${info.hint}. Sélectionne un passage pour le cibler.`;
+    this.el.input.placeholder = `${info.label} — ${info.hint}. Surligne un passage dans le texte pour le cibler.`;
     const entry = this.current;
     if (save && entry && entry.store.workspace.intent !== intent) {
       entry.store.workspace.intent = intent;
@@ -226,7 +226,8 @@ class PartnerPanel {
   buildContext() {
     const editor = this.app.editor;
     const entry = this.current;
-    const selection = editor.selectionEnd > editor.selectionStart ? { start: editor.selectionStart, end: editor.selectionEnd } : null;
+    // Passage ciblé (garde la sélection même après un clic ailleurs), sinon sélection en cours
+    const selection = this.app.targetRange();
     const items = window.PartnerContext.buildContextItems({
       docName: this.app.currentDoc?.name || '',
       docText: this.app.currentDoc ? editor.value : '',
@@ -405,7 +406,7 @@ class PartnerPanel {
     const header = count > 1 ? `<p class="conversation-meta">Conversation ${entry.store.conversations.indexOf(conversation) + 1}/${count} — les précédentes sont conservées dans _PARTNER.json.</p>` : '';
     if (!conversation.messages.length) {
       container.innerHTML = `${header}<div class="partner-empty">
-        <p>Sélectionne un passage ou place le curseur dans une scène, choisis une intention, puis pose ta question.</p>
+        <p>Surligne un passage dans le texte : il reste ciblé (barre « Passage ciblé » en bas) même si tu cliques ailleurs, jusqu'à ce que tu le retires avec × ou Échap. Choisis une intention, puis pose ta question.</p>
         <p>Les propositions de modification apparaissent à part : tu les acceptes, les rejettes ou les gardes comme variantes.</p>
       </div>`;
       return;

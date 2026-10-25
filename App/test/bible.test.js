@@ -88,3 +88,11 @@ test('chronologie : identité période + événement, titre lisible', () => {
   assert.equal(Bible.addEntry(fixture(), 'timeline', { period: 'An 0', event: 'Exode' }).error, null);
   assert.equal(Bible.titleOf('timeline', fixture().timeline[0]), 'An 0 — Chute');
 });
+
+test('suppression groupée de fiches : entrées non structurées conservées', () => {
+  const data = { ...fixture(), characters: [...fixture().characters, 'note brute', { id: 'ch_3', name: 'Nora' }] };
+  const r = Bible.removeEntries(data, 'characters', ['ch_1', 'ch_3']);
+  assert.equal(r.removed, 2);
+  assert.deepEqual(r.data.characters.map(c => c.id || c), ['ch_2', 'note brute']);
+  assert.equal(Bible.removeEntries(data, 'characters', ['x']).data, data);
+});

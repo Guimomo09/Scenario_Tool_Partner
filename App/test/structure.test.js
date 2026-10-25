@@ -166,3 +166,16 @@ test('renommage ambigu ou structurel : aucun lien modifié', () => {
     assert.equal(r.data, data);
   }
 });
+
+test('suppression groupée : seules les scènes choisies disparaissent, ordre conservé', () => {
+  let data = fixture();
+  const ids = [];
+  for (const t of ['A', 'B', 'C', 'D']) { const r = Structure.addScene(data, { title: t }); data = r.data; ids.push(r.scene.id); }
+  const r = Structure.removeScenes(data, [ids[1], ids[3], 'sc_inconnu']);
+  assert.equal(r.removed, 2);
+  assert.deepEqual(r.data.scenes.map(s => s.title), ['A', 'C']);
+  assert.equal(r.data.characters.length, 2);
+  const none = Structure.removeScenes(data, []);
+  assert.equal(none.removed, 0);
+  assert.equal(none.data, data);
+});

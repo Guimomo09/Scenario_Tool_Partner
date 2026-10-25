@@ -25,6 +25,9 @@
       this.filter = '';
       this.dragId = null;
       this.headingCache = new Map();
+      // Scènes cochées pour une action groupée (suppression)
+      this.checked = new Set();
+      this.lastCheckedId = null;
       this.root.addEventListener('click', (e) => this.onClick(e));
       this.root.addEventListener('input', (e) => this.onInput(e));
       this.root.addEventListener('change', (e) => this.onChange(e));
@@ -59,6 +62,8 @@
         return;
       }
       if (this.selectedId && !this.selected) this.selectedId = null;
+      const existing = new Set(this.scenes.map(s => s.id));
+      [...this.checked].forEach(id => { if (!existing.has(id)) this.checked.delete(id); });
       if (!this.selectedId && this.scenes.length) this.selectedId = this.scenes[0].id;
       const readOnly = this.app.readOnlyReason();
       const headings = this.app.currentDoc ? window.Structure.proposeScenesFromHeadings(this.data, this.app.currentDoc.name, this.app.editor.value) : [];
@@ -81,6 +86,7 @@
                 ${fromSequences.length ? `<button class="btn-secondary" data-action="from-sequences"${readOnly ? ' disabled' : ''} title="Une scène par séquence du script, pages et personnages rattachés">Créer depuis les séquences (${fromSequences.length})</button>` : ''}
                 ${headings.length ? `<button class="btn-secondary" data-action="from-headings"${readOnly ? ' disabled' : ''} title="Une scène par titre de section de « ${esc(this.app.currentDoc.name)} »">Créer depuis les titres (${headings.length})</button>` : ''}
                 <button class="btn-primary" data-action="add"${readOnly ? ' disabled' : ''}>${icon('plus')}Ajouter une scène</button>
+                ${this.deleteButtonHtml(readOnly)}
               </div>
             </header>
             ${readOnly ? this.readOnlyBanner(readOnly) : ''}
@@ -91,6 +97,15 @@
           </aside>
         </div>`;
       this.fillHeadings();
+    }
+
+    // Supprime les scènes cochées, sinon la scène sélectionnée
+    deleteButtonHtml(readOnly) {
+      const n = this.checked.size;
+      const disabled = readOnly || (!n && !this.selected);
+      const label = n ? `Supprimer (${n})` : 'Supprimer la scène';
+      const title = n ? `Supprimer les ${n} scène(s) cochée(s) (Ctrl+Z pour annuler)` : 'Supprimer la scène sélectionnée (Suppr sur la scène ; Ctrl+Z pour annuler)';
+      return `<button class="btn-secondary btn-danger" data-action="delete-checked" title="${esc(title)}"${disabled ? ' disabled' : ''}>${icon('trash', 14)}${label}</button>`;
     }
 
     readOnlyBanner(reason) {
@@ -110,10 +125,16 @@
       const rows = this.scenes.map((scene, index) => ({ scene, index }))
         .filter(({ scene }) => !this.filter || (scene.status || 'idea') === this.filter);
       if (!rows.length) return '<p class="view-empty-inline">Aucune scène avec ce statut.</p>';
-      return `<ol class="conductor" aria-label="Scènes dans l'ordre du récit">
+      const allChecked = rows.every(({ scene }) => this.checked.has(scene.id));
+      const dis = this.app.readOnlyReason() ? ' disabled' : '';
+      return `<div class="batch-bar">
+        <label class="check"><input type="checkbox" id="sceneCheckAll"${allChecked ? ' checked' : ''}${dis}> Tout sélectionner</label>
+        ${this.checked.size ? `<span class="muted">${this.checked.size} cochée${this.checked.size > 1 ? 's' : ''}</span> <button class="btn-link" data-action="uncheck-all">Tout décocher</button>` : ''}
+      </div>
+      <ol class="conductor" aria-label="Scènes dans l'ordre du récit">
         ${rows.map(({ scene, index }) => this.renderRowHtml(scene, index)).join('')}
       </ol>
-      <p class="conductor-hint muted">Réordonner : glisser une scène, ou Alt+↑ / Alt+↓ sur la scène sélectionnée.</p>`;
+      <p class="conductor-hint muted">Réordonner : glisser une scène, ou Alt+↑ / Alt+↓. Maj+clic sur une case coche toute une plage ; Suppr supprime la scène sélectionnée.</p>`;
     }
 
     renderRowHtml(scene, index) {
@@ -128,7 +149,9 @@
       if (pages.length || missing.length) meta.push(`${icon('document', 13)}${esc(this.pagesLabel(pages))}${missing.length ? ' <span class="missing">pages introuvables</span>' : ''}`);
       if (scene.doc) meta.push(`${icon('link', 13)}${esc(scene.doc.replace(/\.md$/i, ''))}${scene.heading ? ` › ${esc(scene.heading)}` : ''}`);
       const status = scene.status || 'idea';
-      return `<li class="scene-row${active ? ' active' : ''}" data-id="${esc(scene.id)}" tabindex="0" draggable="true" aria-current="${active}">
+      const checked = this.checked.has(scene.id);
+      return `<li class="scene-row${active ? ' active' : ''}${checked ? ' checked' : ''}" data-id="${esc(scene.id)}" tabindex="0" draggable="true" aria-current="${active}">
+        <input type="checkbox" class="row-check" data-check="${esc(scene.id)}" aria-label="Cocher la scène ${num(index)}"${checked ? ' checked' : ''}${this.app.readOnlyReason() ? ' disabled' : ''}>
         <span class="scene-num" aria-hidden="true">${num(index)}</span>
         <div class="scene-main">
           <div class="scene-line">
@@ -283,6 +306,11 @@
     }
 
     async onClick(e) {
+      const box = e.target.closest('.row-check');
+      if (box) {
+        this.toggleCheck(box.dataset.check, box.checked, e.shiftKey);
+        return;
+      }
       const btn = e.target.closest('[data-action]');
       if (btn && !btn.disabled) {
         const S = window.Structure;
@@ -299,6 +327,12 @@
             await this.move(id, btn.dataset.action === 'up' ? -1 : 1);
             return;
           case 'delete': return this.deleteSelected();
+          case 'delete-checked':
+            return this.checked.size ? this.deleteMany([...this.checked]) : this.deleteSelected();
+          case 'uncheck-all':
+            this.checked.clear();
+            this.render();
+            return;
           case 'write': return this.app.openScene(this.selected);
           case 'ask':
             this.app.setPanelVisible('partner', true);
@@ -336,13 +370,46 @@
       if (!scene) return;
       const { confirmed } = await this.app.showConfirmDialog({
         title: 'Supprimer la scène',
-        message: `« ${scene.title || 'Sans titre'} » sera retirée de la structure. Le texte des documents, les pages et les fiches ne sont pas touchés.`,
+        message: `« ${scene.title || 'Sans titre'} » sera retirée de la structure. Le texte des documents, les pages et les fiches ne sont pas touchés. Ctrl+Z (hors d'un champ) annule la suppression.`,
         confirmLabel: 'Supprimer', cancelLabel: 'Garder'
       });
       if (!confirmed) return;
       const index = this.scenes.indexOf(scene);
       if (await this.mutate(d => window.Structure.removeScene(d, scene.id).data, { render: false, label: 'suppression de scène' })) {
         this.selectedId = this.scenes[Math.min(index, this.scenes.length - 1)]?.id || null;
+        this.render();
+      }
+    }
+
+    toggleCheck(id, on, range) {
+      const visible = this.scenes.filter(sc => !this.filter || (sc.status || 'idea') === this.filter).map(sc => sc.id);
+      let ids = [id];
+      if (range && this.lastCheckedId && visible.includes(this.lastCheckedId)) {
+        const [a, b] = [visible.indexOf(this.lastCheckedId), visible.indexOf(id)].sort((x, y) => x - y);
+        ids = visible.slice(a, b + 1);
+      }
+      ids.forEach(x => (on ? this.checked.add(x) : this.checked.delete(x)));
+      this.lastCheckedId = id;
+      this.render();
+      this.root.querySelector(`.row-check[data-check="${CSS.escape(id)}"]`)?.focus();
+    }
+
+    async deleteMany(ids) {
+      const scenes = this.scenes.filter(sc => ids.includes(sc.id));
+      if (!scenes.length) return;
+      if (scenes.length === 1 && scenes[0].id === this.selectedId) return this.deleteSelected();
+      const list = scenes.slice(0, 12).map(sc => `${num(this.scenes.indexOf(sc))}  ${sc.title || 'Sans titre'}`).join('\n');
+      const { confirmed } = await this.app.showConfirmDialog({
+        title: `Supprimer ${scenes.length} scène${scenes.length > 1 ? 's' : ''}`,
+        message: `${list}${scenes.length > 12 ? `\n… et ${scenes.length - 12} autre(s)` : ''}\n\nLe texte des documents, les pages et les fiches ne sont pas touchés. Ctrl+Z (hors d'un champ) annule la suppression.`,
+        confirmLabel: 'Supprimer', cancelLabel: 'Garder'
+      });
+      if (!confirmed) return;
+      const first = Math.min(...scenes.map(sc => this.scenes.indexOf(sc)));
+      const n = scenes.length;
+      if (await this.mutate(d => window.Structure.removeScenes(d, ids).data, { render: false, label: `suppression de ${n} scène${n > 1 ? 's' : ''}` })) {
+        this.checked.clear();
+        this.selectedId = this.scenes[Math.min(first, this.scenes.length - 1)]?.id || null;
         this.render();
       }
     }
@@ -381,6 +448,12 @@
       if (!scene) return;
       const t = e.target;
       const S = window.Structure;
+      if (t.id === 'sceneCheckAll') {
+        const visible = this.scenes.filter(sc => !this.filter || (sc.status || 'idea') === this.filter).map(sc => sc.id);
+        visible.forEach(id => (t.checked ? this.checked.add(id) : this.checked.delete(id)));
+        this.render();
+        return;
+      }
       if (t.id === 'sceneFilter') {
         this.filter = t.value;
         this.render();
@@ -411,6 +484,10 @@
       } else if (e.key === 'Enter') {
         e.preventDefault();
         this.select(row.dataset.id, { focusTitle: true });
+      } else if (e.key === 'Delete' && !this.app.readOnlyReason()) {
+        e.preventDefault();
+        if (row.dataset.id !== this.selectedId) this.selectedId = row.dataset.id;
+        this.deleteSelected();
       }
     }
 

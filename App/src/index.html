@@ -97,10 +97,14 @@
           <div class="editor-pane" id="notesPane">
             <div class="pane-header">
               <span class="pane-title" id="docTitle">Document</span>
-              <span class="pane-hint" id="docHint">Sélectionnez un passage pour demander l'aide du partenaire sur ce passage précis.</span>
+              <span class="pane-hint" id="docHint">Surlignez un passage : il reste ciblé pour le partenaire jusqu'à ce que vous le retiriez (× ou Échap).</span>
               <button class="btn-link hidden" id="btnSceneHere" title="Créer une scène liée à la section où se trouve le curseur">Créer une scène ici</button>
             </div>
-            <textarea class="editor" id="notesEditor" aria-labelledby="docTitle" spellcheck="true" placeholder="Écrivez ici.&#10;&#10;Les titres de section (## Titre) structurent le document et peuvent devenir des scènes."></textarea>
+            <div class="editor-stack">
+              <!-- Calque sous la zone de texte : surligne le passage ciblé (même police, même mise en page) -->
+              <div class="editor-backdrop" id="editorBackdrop" aria-hidden="true"></div>
+              <textarea class="editor" id="notesEditor" aria-labelledby="docTitle" aria-describedby="docHint" spellcheck="true" placeholder="Écrivez ici.&#10;&#10;Les titres de section (## Titre) structurent le document et peuvent devenir des scènes."></textarea>
+            </div>
           </div>
 
           <div class="editor-resizer" id="editorResizer" aria-hidden="true"></div>
@@ -175,6 +179,13 @@
             <summary>Variantes gardées <span class="drawer-meta" id="variantsCount"></span></summary>
             <div class="drawer-body" id="variantsList"></div>
           </details>
+        </div>
+
+        <div class="target-bar hidden" id="targetBar" role="status" aria-live="polite">
+          <span class="target-label">Passage ciblé</span>
+          <span class="target-excerpt" id="targetExcerpt"></span>
+          <button class="btn-link" id="btnTargetShow" title="Afficher le passage dans le document">Voir</button>
+          <button class="btn-icon" id="btnTargetClear" title="Retirer le passage ciblé (Échap dans le document)" aria-label="Retirer le passage ciblé"><span class="icon" data-icon="close"></span></button>
         </div>
 
         <div class="chat-input-area">

@@ -259,6 +259,38 @@ body:not([data-workspace="write"]) .write-only { display: none; }
   caret-color: var(--accent);
 }
 #notesEditor { padding: 40px max(32px, calc((100% - 68ch) / 2)) 30vh; }
+
+/* Passage ciblé : calque sous la zone de texte, mêmes mesures, seul le surlignage est visible */
+.editor-stack { position: relative; flex: 1; display: flex; min-height: 0; background: var(--bg-secondary); }
+.editor-stack #notesEditor { position: relative; z-index: 1; background: transparent; overflow-y: scroll; }
+.editor-backdrop {
+  position: absolute; inset: 0; z-index: 0;
+  overflow-y: scroll; overflow-x: hidden;
+  padding: 40px max(32px, calc((100% - 68ch) / 2)) 30vh;
+  font-family: var(--font-writing); font-size: 18px; line-height: 1.7;
+  font-variant-ligatures: common-ligatures;
+  white-space: pre-wrap; overflow-wrap: break-word; word-wrap: break-word;
+  color: transparent; pointer-events: none;
+}
+.editor-backdrop::-webkit-scrollbar { background: transparent; }
+.editor-backdrop mark {
+  color: transparent; background: var(--accent-soft);
+  border-bottom: 2px solid var(--accent);
+  border-radius: 0;
+}
+body.focus-mode .editor-backdrop { padding-top: 12vh; }
+
+.target-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px 6px 14px;
+  border-top: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  font-size: 12px;
+}
+.target-label { font-weight: 600; color: var(--text-primary); white-space: nowrap; }
+.target-excerpt { flex: 1; min-width: 0; color: var(--text-secondary); font-family: var(--font-writing); font-style: italic; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.target-bar.stale { border-left-color: var(--warning); }
 #notesEditor::placeholder { color: var(--text-muted); font-style: italic; }
 .editor-resizer { background: var(--border); width: 1px; }
 .script-view { background: var(--bg-primary); }
@@ -319,7 +351,7 @@ body:not([data-workspace="write"]) .write-only { display: none; }
 .scene-row {
   position: relative;
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) auto;
+  grid-template-columns: 20px 44px minmax(0, 1fr) auto;
   gap: 4px 12px;
   padding: 14px 8px 14px 0;
   border-bottom: 1px solid var(--border);
@@ -344,6 +376,16 @@ body:not([data-workspace="write"]) .write-only { display: none; }
 .scene-move { display: flex; flex-direction: column; gap: 2px; opacity: 0; transition: opacity var(--transition); }
 .scene-row:hover .scene-move, .scene-row:focus-within .scene-move, .scene-row.active .scene-move { opacity: 1; }
 .conductor-hint { font-size: 12px; margin-top: 12px; }
+
+/* Sélection groupée (Structure, Bible) */
+.batch-bar { display: flex; align-items: center; gap: 12px; min-height: 28px; margin: 0 0 4px; font-size: 13px; }
+.row-check { accent-color: var(--accent); width: 15px; height: 15px; margin-top: 6px; cursor: pointer; }
+.scene-row.checked, .index-row.checked .bible-index-item { background: var(--bg-tertiary); }
+.index-row { display: flex; align-items: flex-start; gap: 6px; break-inside: avoid; border-bottom: 1px solid var(--border); }
+.index-row .row-check { margin: 11px 0 0 2px; }
+.index-row .bible-index-item { border-bottom: none; }
+.btn-danger { color: var(--error); border-color: currentColor; }
+.btn-danger:hover:not(:disabled) { background: var(--bg-hover); }
 
 /* Fiche de scène */
 .detail-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }

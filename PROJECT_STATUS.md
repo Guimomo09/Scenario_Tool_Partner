@@ -124,6 +124,17 @@ Les projets réels sont encore au format v1 : la migration est proposée à leur
   (`**FIN**`). Texte d'origine gardé ligne à ligne. Voix off = réplique hors champ (plus une pensée). Pages manquantes
   signalées. « Côte à côte : … » n'est plus pris pour un locuteur. Contrôle lecture seule sur L'ABRI : 6 séquences,
   60 pages, 197 répliques, 17 pensées, 0 ligne non classée, sans perte. 108 tests.
+- Passage ciblé (2026-10-26) : une sélection dans le document reste ciblée pour le partenaire après un clic ailleurs
+  (surlignage brique sous le texte, barre « Passage ciblé » avec Voir / ×) ; retirée par ×, Échap dans le texte,
+  changement de document ou si le passage lui-même est modifié (avis) ; suit les modifications faites autour.
+  109 tests ; banc Electron 35 + 9 contrôles OK.
+- Sélection groupée (2026-10-26) : cases à cocher sur les scènes (Structure) et les fiches (Bible), « Tout
+  sélectionner », Maj+clic pour une plage, bouton « Supprimer (N) » à côté d'« Ajouter » (sans case cochée : la
+  scène / fiche ouverte), Suppr sur une scène ; une confirmation, une seule étape Ctrl+Z. 111 tests ; banc 35 + 9 OK.
+- Lanceur (2026-10-26) : nouvelle icône (ivoire, « P » Source Serif, marge et repère brique) en `assets/icon.svg/.png/.ico` ;
+  raccourcis Bureau + menu Démarrer qui lancent `electron.exe` sur le dossier `App` (pas de console), créés par
+  `App/Creer-Raccourcis.ps1` (ou `CreerRaccourciBureau.bat`) ; fenêtre « Partner », identité Windows
+  `com.partner.writing`, une seule instance (relancer ramène la fenêtre). Vérifié : ouverture par l'Explorateur OK.
 
 ## Next
 - **Utilisateur** : révoquer l'ancienne clé OpenAI ; tester à la main l'incrément 1.
@@ -149,7 +160,7 @@ Les projets réels sont encore au format v1 : la migration est proposée à leur
 - Pas de fusion d'alias assistée (seulement signalée).
 - Parcours de migration/restauration non testés à la main dans l'UI.
 - CSP : `unsafe-inline` encore nécessaire (styles/handlers en ligne de l'ancien code).
-- Projets/config dépendent du dossier d'installation ; `assets/icon.png` absent (build).
+- Projets/config dépendent du dossier d'installation : pas d'installeur (electron-builder) tant que l'espace de travail n'est pas séparé ; le raccourci pointe vers le dossier actuel (à recréer si déplacé).
 - `app.js` encore gros (~1 900 lignes) ; heuristiques de `manga-analysis.js` taillées pour les projets existants (noms en dur).
 - Lien scène ↔ section : un renommage fait hors de l'app, ou plusieurs titres changés d'un coup, n'est pas suivi (signalé à l'ouverture de la scène).
 - Annulation Structure/Bible en mémoire seulement : perdue à la fermeture ou au changement de projet.

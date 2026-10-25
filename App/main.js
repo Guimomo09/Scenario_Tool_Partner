@@ -20,6 +20,20 @@ const INBOX_PATH = path.join(PARTNER_PATH, 'Inbox');
 // Désactiver le cache en développement
 app.commandLine.appendSwitch('disable-http-cache');
 
+// Identité Windows : la fenêtre se regroupe sous l'icône Partner dans la barre des tâches
+app.setName('Partner');
+if (process.platform === 'win32') app.setAppUserModelId('com.partner.writing');
+// Une seule instance : relancer depuis le raccourci ramène la fenêtre déjà ouverte
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  });
+}
+
 function createWindow() {
   closeConfirmed = false;
   mainWindow = new BrowserWindow({
@@ -27,8 +41,8 @@ function createWindow() {
     height: 900,
     minWidth: 1000,
     minHeight: 700,
-    title: 'Writing Partner',
-    icon: path.join(__dirname, 'assets', 'icon.png'),
+    title: 'Partner',
+    icon: path.join(__dirname, 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

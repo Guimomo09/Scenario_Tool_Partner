@@ -96,6 +96,19 @@
     return { ...current, index: sections.indexOf(current), total: sections.length };
   }
 
+  // Passage ciblé après une modification du document : même position si le texte y est encore,
+  // sinon l'occurrence identique la plus proche de l'ancienne position, sinon null (passage modifié).
+  function relocate(docText, target) {
+    const value = String(docText || '');
+    if (!target || !target.text) return null;
+    if (value.slice(target.start, target.end) === target.text) return { start: target.start, end: target.end };
+    let best = null;
+    for (let at = value.indexOf(target.text); at >= 0; at = value.indexOf(target.text, at + 1)) {
+      if (best === null || Math.abs(at - target.start) < Math.abs(best - target.start)) best = at;
+    }
+    return best === null ? null : { start: best, end: best + target.text.length };
+  }
+
   // Garde un extrait centré sur `focus` si le texte dépasse `limit`
   function clip(text, limit, focus = 0) {
     if (text.length <= limit) return { text, truncated: false };
@@ -327,7 +340,7 @@
 
   return {
     INTENTS, DEFAULT_INTENT, LIMITS,
-    listSections, findSection, clip, mentions, findMentionedEntities, describeEntity, describeScene,
+    listSections, findSection, relocate, clip, mentions, findMentionedEntities, describeEntity, describeScene,
     buildContextItems, selectHistory, systemPrompt, assembleRequest
   };
 });

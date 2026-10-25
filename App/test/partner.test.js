@@ -203,3 +203,14 @@ test('nouvelle conversation : l\'ancienne est conservée', () => {
   assert.equal(store.conversations.length, 2);
   assert.equal(Store.startConversation(store).id, second.id, 'conversation vide réutilisée');
 });
+
+test('passage ciblé : suit le texte modifié autour, disparaît s\'il est lui-même modifié', () => {
+  const doc = 'Avant. Le quai attend. Après.';
+  const target = { start: 7, end: 22, text: 'Le quai attend.' };
+  assert.deepEqual(Ctx.relocate(doc, target), { start: 7, end: 22 });
+  assert.deepEqual(Ctx.relocate('Ajout. ' + doc, target), { start: 14, end: 29 });
+  assert.equal(Ctx.relocate('Avant. Le quai dort. Après.', target), null);
+  // Plusieurs occurrences : la plus proche de l'ancienne position
+  assert.deepEqual(Ctx.relocate('Le quai attend. X Le quai attend.', { start: 18, end: 33, text: 'Le quai attend.' }), { start: 18, end: 33 });
+  assert.deepEqual(Ctx.relocate('Y Le quai attend. ZZZZZZZZZZZZZZZZZZZ Le quai attend.', { start: 3, end: 18, text: 'Le quai attend.' }), { start: 2, end: 17 });
+});

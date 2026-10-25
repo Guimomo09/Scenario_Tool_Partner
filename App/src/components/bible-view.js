@@ -39,6 +39,9 @@
       this.selectedId = null;
       this.query = '';
       this.mode = 'view'; // view, edit, add
+      // Fiches cochées (onglet courant) pour une suppression groupée
+      this.checked = new Set();
+      this.lastCheckedId = null;
       this.formError = null;
       this.root.addEventListener('click', (e) => this.onClick(e));
       this.root.addEventListener('input', (e) => {
@@ -99,6 +102,7 @@
               </div>
               ${this.kind !== 'analysis' ? `<div class="view-actions">
                 <button class="btn-primary" data-action="add"${readOnly ? ' disabled' : ''}>${icon('plus')}Ajouter un ${esc(this.spec.singular)}</button>
+                <span id="bibleDeleteSlot"></span>
               </div>` : ''}
             </header>
             <div class="bible-tabs" role="tablist" aria-label="Types de fiches">${tabs.join('')}</div>
@@ -108,6 +112,7 @@
               <label class="visually-hidden" for="bibleSearch">Rechercher dans les fiches</label>
               <input id="bibleSearch" type="search" placeholder="Rechercher…" value="${esc(this.query)}">
             </div>
+            <div class="batch-bar" id="bibleBatchBar"></div>
             <ul class="bible-index" id="bibleIndex" aria-label="${esc(this.spec.label)}"></ul>`}
           </div>
           <article class="view-detail bible-sheet" id="bibleSheet" aria-live="polite"></article>
@@ -127,6 +132,10 @@
       const B = window.Bible;
       const items = B.search(this.data, this.kind, this.query);
       const loose = this.entries.filter(e => !e || typeof e !== 'object');
+      const existing = new Set(this.entries.filter(e => e && typeof e === 'object').map(e => e.id));
+      [...this.checked].forEach(id => { if (!existing.has(id)) this.checked.delete(id); });
+      this.visibleIds = items.map(e => e.id);
+      this.renderBatchUi();
       if (!items.length && !loose.length) {
         list.innerHTML = `<li class="nav-empty">${this.query ? 'Aucune fiche ne correspond.' : `Aucun ${esc(this.spec.singular)} pour l'instant.`}</li>`;
         return;
@@ -134,11 +143,69 @@
       list.innerHTML = items.map(e => {
         const active = e.id === this.selectedId;
         const sub = this.kind === 'characters' ? (e.role || (e.suggestedRole ? `${e.suggestedRole} ?` : '')) : (e.type || e.category || e.source || '');
-        return `<li><button class="bible-index-item${active ? ' active' : ''}" data-id="${esc(e.id)}"${active ? ' aria-current="true"' : ''}>
+        const checked = this.checked.has(e.id);
+        return `<li class="index-row${checked ? ' checked' : ''}"><input type="checkbox" class="row-check" data-check="${esc(e.id)}" aria-label="Cocher « ${esc(B.titleOf(this.kind, e))} »"${checked ? ' checked' : ''}${this.app.readOnlyReason() ? ' disabled' : ''}><button class="bible-index-item${active ? ' active' : ''}" data-id="${esc(e.id)}"${active ? ' aria-current="true"' : ''}>
           <span class="index-title">${esc(B.titleOf(this.kind, e)) || '<span class="muted">Sans nom</span>'}</span>
           ${sub ? `<span class="index-sub">${esc(sub)}</span>` : ''}
         </button></li>`;
       }).join('') + loose.map(v => `<li class="index-loose" title="Entrée non structurée, conservée telle quelle">${esc(v)}</li>`).join('');
+    }
+
+    // Case « Tout sélectionner » et bouton Supprimer (fiches cochées, sinon la fiche ouverte)
+    renderBatchUi() {
+      const bar = this.root.querySelector('#bibleBatchBar');
+      const slot = this.root.querySelector('#bibleDeleteSlot');
+      const readOnly = !!this.app.readOnlyReason();
+      const n = this.checked.size;
+      const visible = this.visibleIds || [];
+      if (bar) {
+        const all = visible.length > 0 && visible.every(id => this.checked.has(id));
+        bar.innerHTML = visible.length
+          ? `<label class="check"><input type="checkbox" id="bibleCheckAll"${all ? ' checked' : ''}${readOnly ? ' disabled' : ''}> Tout sélectionner${this.query ? ' (résultats affichés)' : ''}</label>
+             ${n ? `<span class="muted">${n} cochée${n > 1 ? 's' : ''}</span> <button class="btn-link" data-action="uncheck-all">Tout décocher</button>` : ''}`
+          : '';
+      }
+      if (slot) {
+        const disabled = readOnly || (!n && !this.selected);
+        slot.innerHTML = `<button class="btn-secondary btn-danger" data-action="delete-checked"${disabled ? ' disabled' : ''} title="${n ? `Supprimer les ${n} fiche(s) cochée(s)` : 'Supprimer la fiche ouverte'} (Ctrl+Z pour annuler)">${icon('trash', 14)}${n ? `Supprimer (${n})` : 'Supprimer'}</button>`;
+      }
+    }
+
+    toggleCheck(id, on, range) {
+      const visible = this.visibleIds || [];
+      let ids = [id];
+      if (range && this.lastCheckedId && visible.includes(this.lastCheckedId)) {
+        const [a, b] = [visible.indexOf(this.lastCheckedId), visible.indexOf(id)].sort((x, y) => x - y);
+        ids = visible.slice(a, b + 1);
+      }
+      ids.forEach(x => (on ? this.checked.add(x) : this.checked.delete(x)));
+      this.lastCheckedId = id;
+      this.renderIndex();
+      this.root.querySelector(`.row-check[data-check="${CSS.escape(id)}"]`)?.focus();
+    }
+
+    async deleteMany(ids) {
+      const B = window.Bible;
+      const entries = this.entries.filter(e => e && typeof e === 'object' && ids.includes(e.id));
+      if (!entries.length) return;
+      const linked = this.kind === 'characters'
+        ? entries.reduce((n, e) => n + window.Structure.scenesForCharacter(this.data, e.id).length, 0) : 0;
+      const list = entries.slice(0, 12).map(e => `• ${B.titleOf(this.kind, e) || 'Sans nom'}`).join('\n');
+      const { confirmed } = await this.app.showConfirmDialog({
+        title: `Supprimer ${entries.length} fiche${entries.length > 1 ? 's' : ''}`,
+        message: `${list}${entries.length > 12 ? `\n… et ${entries.length - 12} autre(s)` : ''}\n\nLes documents ne sont pas modifiés. Ctrl+Z (hors d'un champ) annule la suppression.` +
+          (linked ? `\n\nDes scènes citent ces fiches : leurs liens restent, signalés comme « fiche supprimée ».` : ''),
+        confirmLabel: 'Supprimer', cancelLabel: 'Garder'
+      });
+      if (!confirmed) return;
+      const kind = this.kind;
+      const n = entries.length;
+      if (await this.app.mutateProject(d => B.removeEntries(d, kind, ids).data, { label: `suppression de ${n} fiche${n > 1 ? 's' : ''}` })) {
+        this.checked.clear();
+        if (ids.includes(this.selectedId)) this.selectedId = null;
+        this.mode = 'view';
+        this.render();
+      }
     }
 
     renderSheet() {
@@ -241,11 +308,23 @@
       if (tab) {
         this.kind = tab.dataset.kind;
         this.selectedId = null;
+        this.checked.clear();
         this.mode = 'view';
         this.formError = null;
         this.query = '';
         this.render();
         this.root.querySelector('.bible-tab.active')?.focus();
+        return;
+      }
+      const box = e.target.closest('.row-check');
+      if (box) {
+        this.toggleCheck(box.dataset.check, box.checked, e.shiftKey);
+        return;
+      }
+      if (e.target.id === 'bibleCheckAll') {
+        (this.visibleIds || []).forEach(id => (e.target.checked ? this.checked.add(id) : this.checked.delete(id)));
+        this.renderIndex();
+        this.root.querySelector('#bibleCheckAll')?.focus();
         return;
       }
       const item = e.target.closest('.bible-index-item');
@@ -258,6 +337,7 @@
         this.renderSheet();
         return;
       }
+
       const btn = e.target.closest('[data-action]');
       if (!btn || btn.disabled) return;
       const B = window.Bible;
@@ -277,6 +357,10 @@
           return;
         }
         case 'delete': return this.deleteSelected();
+        case 'delete-checked':
+          return this.checked.size ? this.deleteMany([...this.checked]) : this.deleteSelected();
+        case 'uncheck-all':
+          this.checked.clear(); this.renderIndex(); return;
         case 'open-scene': return this.app.goToScene(btn.dataset.scene, { workspace: 'structure' });
         case 'migrate': return this.app.offerMigration().then(() => this.render());
       }
