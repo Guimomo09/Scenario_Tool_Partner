@@ -21,14 +21,34 @@
   // Nom seul sur sa ligne ("Ari", "Ari (pensée)"), reconnu seulement si une réplique à tiret suit
   const BARE_SPEAKER_RE = new RegExp(`^(${NAME})(?:\\s*\\(([^)]+)\\))?$`);
   const PHRASE_WORDS = /\b(et|ou|dans|sur|pour|avec|est|sont|ont|fait|va|vont|se|ils|elles|il|elle|un|une|le|la|les)\b/i;
-  const THOUGHT_MODIFIER = /pens[ée]e|voix[\s-]?off|\boff\b/i;
+  const THOUGHT_MODIFIER = /pens[ée]e/i;
   const DASH_RE = /^[-–—]\s*(.+)$/;
   const QUOTED_RE = /^["«“](.+?)["»”]$/;
   const FIGURANTS = ['présentateur', 'technicien', 'majordome', 'serveur', 'garde', 'soldat'];
 
+  // « Côte à côte : … » est une phrase, pas un locuteur (\b ne reconnaît pas « à »)
+  const PHRASE_PARTICLES = /(?:^|\s)(?:à|au|aux)(?:\s|$)/i;
+  const SEPARATOR_RE = /^(?:-{3,}|\*{3,}|_{3,})$/;
+
   const cleanName = (name) => name.trim().replace(/\s+/g, ' ');
 
+  // Forme d'une ligne utilisée pour la reconnaissance : titres Markdown (« ### Page 1 ») et nom en gras
+  // (« **Ari (pensée):** réplique ») ramenés au format simple. Le texte d'origine reste dans `raw`.
+  function matchable(trimmed) {
+    let t = trimmed.replace(/^#{1,6}\s+/, '');
+    const bold = t.match(/^\*\*([^*]+?)\*\*\s*(.*)$/);
+    if (bold) {
+      const inner = bold[1].trim();
+      t = /[:：]$/.test(inner) ? `${inner} ${bold[2]}`.trim() : bold[2] ? `${inner} ${bold[2]}` : inner;
+    }
+    return t;
+  }
+
+  // Emphase Markdown retirée du texte affiché (« **FIN** », « *Fondu noir* »)
+  const stripEmphasis = (text) => text.replace(/^(\*{1,2}|_{1,2})(.+)\1$/, '$2').trim();
+
   function isMangaScript(content) {
+    content = String(content ?? '').split(/\r?\n/).map(l => matchable(l.trim())).join('\n');
     const hasPages = /^\s*(?:double\s+)?pages?\s*\d+/im.test(content);
     const hasSequences = /^\s*s[ée]quence\s*\d+/im.test(content);
     const hasDialogues = new RegExp(`^\\s*${NAME}\\s*(?:\\([^)]*\\))?\\s*[:：]`, 'm').test(content) || /^\s*[-–—][^-]/m.test(content);
@@ -84,8 +104,15 @@
 
     lines.forEach((line, index) => {
       const lineNumber = index + 1;
-      const trimmed = line.trim();
-      if (!trimmed) return;
+      const original = line.trim();
+      if (!original) return;
+      // Séparateur Markdown (« --- ») : conservé, sans effet sur la réplique en cours
+      if (SEPARATOR_RE.test(original)) {
+        flushPendingSpeaker();
+        target().push({ type: 'separator', text: '', raw: original, line: lineNumber });
+        return;
+      }
+      const trimmed = matchable(original);
 
       const seqMatch = trimmed.match(SEQUENCE_RE);
       if (seqMatch) {
@@ -93,7 +120,7 @@
         // Une nouvelle séquence ferme la page en cours : elle reste dans sa séquence d'origine
         page = null;
         speaker = null;
-        sequence = { number: parseInt(seqMatch[1], 10), title: trimmed, label: seqMatch[2].trim(), line: lineNumber, pages: [], intro: [] };
+        sequence = { number: parseInt(seqMatch[1], 10), title: trimmed, raw: original, label: seqMatch[2].trim(), line: lineNumber, pages: [], intro: [] };
         result.sequences.push(sequence);
         return;
       }
@@ -105,7 +132,7 @@
         const start = parseInt(pageMatch[3], 10);
         const end = pageMatch[4] ? parseInt(pageMatch[4], 10) : null;
         const isDouble = !!(pageMatch[1] || pageMatch[2]) || (end !== null && end > start);
-        const header = { type: 'header', text: pageMatch[5].trim(), raw: trimmed, line: lineNumber };
+        const header = { type: 'header', text: pageMatch[5].trim(), raw: original, line: lineNumber };
 
         if (pagesByNumber.has(start)) {
           // Page répétée : la suite est ajoutée à la page existante, rien n'est écrasé
@@ -133,19 +160,19 @@
       if (!speakerMatch) {
         const bare = trimmed.match(BARE_SPEAKER_RE);
         const next = nextNonEmpty[index];
-        if (bare && next && DASH_RE.test(next)) speakerMatch = [trimmed, bare[1], bare[2], ''];
+        if (bare && next && DASH_RE.test(matchable(next))) speakerMatch = [trimmed, bare[1], bare[2], ''];
       }
       if (speakerMatch) {
         const name = cleanName(speakerMatch[1]);
-        const isPhrase = name.split(' ').length > 3 || PHRASE_WORDS.test(name);
+        const isPhrase = name.split(' ').length > 3 || PHRASE_WORDS.test(name) || PHRASE_PARTICLES.test(name);
         if (!isPhrase) {
           flushPendingSpeaker();
           speaker = { name, thought: THOUGHT_MODIFIER.test(speakerMatch[2] || '') };
           const text = speakerMatch[3].trim();
           if (text) {
-            pushLine(speaker.thought ? 'thought' : 'dialogue', text, trimmed, lineNumber, speaker);
+            pushLine(speaker.thought ? 'thought' : 'dialogue', text, original, lineNumber, speaker);
           } else {
-            pendingSpeaker = { raw: trimmed, line: lineNumber };
+            pendingSpeaker = { raw: original, line: lineNumber };
           }
           return;
         }
@@ -155,25 +182,43 @@
       const quotedMatch = trimmed.match(QUOTED_RE);
       if ((dashMatch || quotedMatch) && speaker) {
         const text = (dashMatch ? dashMatch[1] : quotedMatch[1]).trim();
-        pushLine(speaker.thought ? 'thought' : 'dialogue', text, trimmed, lineNumber, speaker);
+        pushLine(speaker.thought ? 'thought' : 'dialogue', text, original, lineNumber, speaker);
         return;
       }
 
       flushPendingSpeaker();
       // Indication scénique entre parenthèses : ne coupe pas la réplique en cours
       if (/^\(.+\)$/.test(trimmed)) {
-        pushLine('indication', trimmed.slice(1, -1).trim(), trimmed, lineNumber);
+        pushLine('indication', trimmed.slice(1, -1).trim(), original, lineNumber);
         return;
       }
       // Réplique sans locuteur identifiable, parenthèse ouverte… : conservée telle quelle
       if (dashMatch || quotedMatch || trimmed.startsWith('(')) {
-        pushLine('unknown', trimmed, trimmed, lineNumber);
+        pushLine('unknown', trimmed, original, lineNumber);
         return;
       }
-      pushLine('action', trimmed, trimmed, lineNumber);
+      pushLine('action', stripEmphasis(trimmed), original, lineNumber);
       speaker = null;
     });
     flushPendingSpeaker();
+
+    // Numéros de pages absents entre deux pages du script : signalés à l'auteur
+    const covered = new Set(result.pages.flatMap(p => {
+      const nums = [p.number];
+      for (let n = p.number + 1; p.endNumber && n <= p.endNumber; n++) nums.push(n);
+      return nums;
+    }));
+    const max = Math.max(0, ...covered);
+    const missing = [];
+    for (let n = Math.min(...covered); n < max; n++) if (!covered.has(n)) missing.push(n);
+    if (missing.length) {
+      const ranges = [];
+      missing.forEach(n => {
+        const last = ranges[ranges.length - 1];
+        if (last && n === last[1] + 1) last[1] = n; else ranges.push([n, n]);
+      });
+      result.warnings.push(`Pages absentes du script : ${ranges.map(([a, b]) => (a === b ? `${a}` : `${a} à ${b}`)).join(', ')}.`);
+    }
 
     // Vues dérivées pour les analyses existantes (l'ordre commun reste dans `blocks`)
     for (const p of result.pages) {
@@ -215,7 +260,7 @@
   function sourceLines(result) {
     const all = [
       ...result.preamble,
-      ...result.sequences.flatMap(s => [{ raw: s.title, line: s.line }, ...s.intro]),
+      ...result.sequences.flatMap(s => [{ raw: s.raw ?? s.title, line: s.line }, ...s.intro]),
       ...result.pages.flatMap(p => p.blocks)
     ];
     return all.sort((a, b) => a.line - b.line).flatMap(b => b.raw.split('\n'));

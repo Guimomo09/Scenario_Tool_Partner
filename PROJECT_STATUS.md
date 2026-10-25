@@ -11,6 +11,7 @@ Les projets réels sont encore au format v1 : la migration est proposée à leur
 |---|---|
 | Origin Zero | Script jusqu'à ~p.70 dans `../Scenario_Manga/Origin_Zero.*` ; `Projets/` n'a que p.1-28 |
 | Origin Mars | Story bible complète (`_PLAN.md`), protagoniste non défini (piste : héroïne) |
+| L'ABRI | Projet créé le 2026-10-26 : `_NOTES.md` = copie exacte de `../Scenario-main/L'ABRI_dialogues_complets.md` (p.1-70, pages 30-34 absentes du texte). Pas encore analysé. Lien avec Origin Zero (mêmes personnages) à trancher par l'auteur |
 | Rocket League IRL | Story bible seule dans `../Scenario_Manga/`, pas de dossier `Projets/` |
 
 ## Recently completed
@@ -118,6 +119,11 @@ Les projets réels sont encore au format v1 : la migration est proposée à leur
   - `manga-analysis.js` testé (9 tests) ; corrigé : les événements de chronologie détectés n'avaient pas de
     `period` et étaient tous écartés par la validation.
   - 102 tests `node:test` ; banc Electron : 35 contrôles OK, 0 erreur console.
+- Format Markdown des scripts (2026-10-26) : le parseur reconnaît `## Séquence`, `### Page`, `### Double page 40-41`,
+  noms en gras (`**Ari (pensée):**`) suivis de répliques en liste ou sur la même ligne, séparateurs `---`, emphase
+  (`**FIN**`). Texte d'origine gardé ligne à ligne. Voix off = réplique hors champ (plus une pensée). Pages manquantes
+  signalées. « Côte à côte : … » n'est plus pris pour un locuteur. Contrôle lecture seule sur L'ABRI : 6 séquences,
+  60 pages, 197 répliques, 17 pensées, 0 ligne non classée, sans perte. 108 tests.
 
 ## Next
 - **Utilisateur** : révoquer l'ancienne clé OpenAI ; tester à la main l'incrément 1.
@@ -125,6 +131,7 @@ Les projets réels sont encore au format v1 : la migration est proposée à leur
   « Synchroniser » sur Origin Zero pour obtenir les blocs ordonnés (les anciennes pages restent sinon en v1 d'affichage).
 - **Utilisateur** : Paramètres › choisir le fournisseur, vérifier le modèle (bouton « Modèles disponibles »),
   puis un premier vrai échange sur un passage (premier appel payant, non fait ici).
+- **Utilisateur** : ouvrir L'ABRI, « Analyser les notes », puis Structure › « Créer depuis les séquences ».
 - **Utilisateur** : tester à la main Structure, Bible et le mode focus sur un vrai projet (après migration).
 - Suite possible : diffusion des réponses IA en continu, historique des conversations consultable, création/renommage
   de documents, fusion d'alias assistée, retrait de `unsafe-inline` (CSP), espace de travail hors dossier d'installation.

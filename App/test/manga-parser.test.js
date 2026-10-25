@@ -125,3 +125,77 @@ test('le texte HTML du manuscrit est conservé brut (l\'échappement se fait au 
   const result = MangaParser.parse('Page 1\n<img src=x onerror=alert(1)>');
   assert.equal(result.pages[0].blocks[1].raw, '<img src=x onerror=alert(1)>');
 });
+
+// Format Markdown : titres « ### Page », noms en gras, répliques en liste, séparateurs
+const MD_SCRIPT = [
+  '# TITRE - DIALOGUES',
+  '',
+  '## Séquence 1',
+  '',
+  '### Page 1',
+  'Lina attend sur le quai.',
+  '',
+  '**Marc:**',
+  '- Tu es là ?',
+  '- Réponds.',
+  '',
+  '**Lina (en pensées):**',
+  '- Encore lui.',
+  '',
+  '(Dernière case = quai vide)',
+  '',
+  '---',
+  '',
+  '## Séquence 2',
+  '',
+  '### Double page 2-3',
+  '**Voix-off:** Two roads diverged.',
+  'Côte à côte : les visages de Lina et Marc.',
+  '*Fondu noir*',
+  '**FIN**'
+].join('\n');
+
+test('format Markdown : séquences, pages et doubles pages reconnues', () => {
+  assert.equal(MangaParser.isMangaScript(MD_SCRIPT), true);
+  const result = MangaParser.parse(MD_SCRIPT);
+  assert.deepEqual(result.sequences.map(s => [s.number, s.pages]), [[1, [1]], [2, [2]]]);
+  assert.equal(result.pages[1].isDoublePage, true);
+  assert.equal(result.pages[1].endNumber, 3);
+});
+
+test('format Markdown : nom en gras puis répliques en liste, pensées, ordre conservé', () => {
+  const page1 = MangaParser.parse(MD_SCRIPT).pages[0];
+  assert.deepEqual(page1.blocks.map(b => b.type),
+    ['header', 'action', 'dialogue', 'dialogue', 'thought', 'indication', 'separator']);
+  assert.equal(page1.blocks[2].speaker, 'Marc');
+  assert.equal(page1.blocks[2].raw, '**Marc:**\n- Tu es là ?');
+  assert.equal(page1.blocks[4].speaker, 'Lina');
+});
+
+test('format Markdown : réplique sur la ligne du nom, phrase « Côte à côte : » non prise pour un locuteur', () => {
+  const page2 = MangaParser.parse(MD_SCRIPT).pages[1];
+  assert.deepEqual(page2.blocks.slice(1).map(b => [b.type, b.speaker || null, b.text]), [
+    ['dialogue', 'Voix-off', 'Two roads diverged.'],
+    ['action', null, 'Côte à côte : les visages de Lina et Marc.'],
+    ['action', null, 'Fondu noir'],
+    ['action', null, 'FIN']
+  ]);
+  assert.equal(page2.blocks.at(-1).raw, '**FIN**');
+});
+
+test('format Markdown : aucune ligne perdue, texte d\'origine intact', () => {
+  assert.deepEqual(MangaParser.sourceLines(MangaParser.parse(MD_SCRIPT)), nonEmpty(MD_SCRIPT));
+});
+
+test('pages absentes signalées, pas inventées', () => {
+  const result = MangaParser.parse('Page 1\nA.\nDouble page 2-3\nB.\nPage 6\nC.\nPage 8\nD.');
+  assert.deepEqual(result.pages.map(p => p.number), [1, 2, 6, 8]);
+  assert.deepEqual(result.warnings, ['Pages absentes du script : 4 à 5, 7.']);
+});
+
+test('voix off : réplique hors champ, pas une pensée ; titre de séquence sans « ## »', () => {
+  const result = MangaParser.parse('## Séquence 1 : Départ\nPage 1\nKeyn (voix off) : Bienvenue.\nAri (pensée) : Non.');
+  assert.deepEqual(result.pages[0].blocks.slice(1).map(b => b.type), ['dialogue', 'thought']);
+  assert.equal(result.sequences[0].title, 'Séquence 1 : Départ');
+  assert.equal(result.sequences[0].raw, '## Séquence 1 : Départ');
+});

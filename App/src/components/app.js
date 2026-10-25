@@ -1545,6 +1545,8 @@ RÈGLES:
                 html += `<div class="manga-indication">(${esc(b.text)})</div>`;
               } else if (b.type === 'action') {
                 html += `<div class="manga-action">${esc(b.text)}</div>`;
+              } else if (b.type === 'separator') {
+                // séparateur Markdown (---) : rien à afficher
               } else {
                 html += `<div class="manga-unknown" title="Ligne non classée, conservée telle quelle">${esc(b.raw ?? b.text)}</div>`;
               }
