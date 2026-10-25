@@ -138,7 +138,9 @@ class MangaAnalysis {
     // === TIMELINE DU MONDE ===
     if (worldContext.timeline.events.length > 0) {
       worldContext.timeline.events.forEach(event => {
+        // `period` est requis par la validation : sans lui l'événement serait écarté
         updates.timeline_updates.push({
+          period: event.when || 'Avant le récit',
           event: event.name,
           when: event.when,
           significance: event.significance
@@ -1118,3 +1120,5 @@ class MangaAnalysis {
 }
 
 window.MangaAnalysis = MangaAnalysis;
+// Tests (node) : `window` est fourni par le test, avec MangaParser
+if (typeof module === 'object' && module.exports) module.exports = MangaAnalysis;

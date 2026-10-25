@@ -140,3 +140,29 @@ test('les scènes passent la migration et reçoivent un identifiant', () => {
   assert.match(plan.data.scenes[0].id, /^sc_/);
   assert.deepEqual(Schema.verifyMigration({ title: 'v1', scenes: [{ title: 'Sans id' }] }, plan.data), []);
 });
+
+test('renommer un titre de section : les scènes liées suivent', () => {
+  let data = Structure.addScene(fixture(), { title: 'Le quai', doc: 'Ep.md', heading: 'Le quai' }).data;
+  data = Structure.addScene(data, { title: 'Titre libre', doc: 'Ep.md', heading: 'Le quai' }).data;
+  data = Structure.addScene(data, { title: 'Le quai', doc: 'Autre.md', heading: 'Le quai' }).data;
+  const r = Structure.followHeadingRename(data, 'Ep.md', ['Intro', 'Le quai', 'Fin'], ['Intro', 'Le quai de nuit', 'Fin']);
+  assert.equal(r.renamed.length, 2);
+  assert.deepEqual(r.data.scenes.map(s => [s.title, s.heading]),
+    [['Le quai de nuit', 'Le quai de nuit'], ['Titre libre', 'Le quai de nuit'], ['Le quai', 'Le quai']]);
+});
+
+test('renommage ambigu ou structurel : aucun lien modifié', () => {
+  const data = Structure.addScene(fixture(), { doc: 'Ep.md', heading: 'A' }).data;
+  const cases = [
+    [['A', 'B'], ['A2', 'B2']],      // deux titres changés
+    [['A', 'B'], ['A', 'B', 'C']],   // section ajoutée
+    [['A', 'B'], ['B', 'B']],        // le nouveau titre existe déjà
+    [['A', 'A'], ['X', 'A']],        // l'ancien titre était en double
+    [['A', 'B'], ['', 'B']]          // titre vidé
+  ];
+  for (const [before, after] of cases) {
+    const r = Structure.followHeadingRename(data, 'Ep.md', before, after);
+    assert.equal(r.renamed.length, 0, JSON.stringify(after));
+    assert.equal(r.data, data);
+  }
+});

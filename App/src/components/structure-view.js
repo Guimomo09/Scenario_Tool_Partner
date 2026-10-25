@@ -276,8 +276,8 @@
 
     // --- Actions ---
 
-    async mutate(fn, { render = true } = {}) {
-      const ok = await this.app.mutateProject(fn);
+    async mutate(fn, { render = true, ...options } = {}) {
+      const ok = await this.app.mutateProject(fn, options);
       if (ok && render) this.render();
       return ok;
     }
@@ -290,7 +290,7 @@
         switch (btn.dataset.action) {
           case 'add': {
             let created = null;
-            if (await this.mutate(d => { const r = S.addScene(d, {}, { after: this.selectedId }); created = r.scene; return r.data; }, { render: false })) {
+            if (await this.mutate(d => { const r = S.addScene(d, {}, { after: this.selectedId }); created = r.scene; return r.data; }, { render: false, label: 'ajout de scène' })) {
               this.select(created.id, { focusTitle: true });
             }
             return;
@@ -306,13 +306,13 @@
             return;
           case 'spread': {
             const on = btn.getAttribute('aria-pressed') !== 'true';
-            await this.mutate(d => S.setPageSpread(d, btn.dataset.page, on).data);
+            await this.mutate(d => S.setPageSpread(d, btn.dataset.page, on).data, { label: on ? 'double page' : 'double page retirée' });
             return;
           }
           case 'drop-missing': {
             const scene = this.selected;
             const keep = S.charactersOf(this.data, scene).filter(c => !c.missing).map(c => c.id);
-            await this.mutate(d => S.updateScene(d, scene.id, { characters: keep }).data);
+            await this.mutate(d => S.updateScene(d, scene.id, { characters: keep }).data, { label: 'liens retirés' });
             return;
           }
           case 'from-sequences': return this.createFrom(S.proposeScenesFromSequences(this.data), 'séquences du script');
@@ -327,7 +327,7 @@
     }
 
     async move(id, delta) {
-      await this.mutate(d => window.Structure.moveSceneBy(d, id, delta).data);
+      await this.mutate(d => window.Structure.moveSceneBy(d, id, delta).data, { label: 'déplacement de scène' });
       this.root.querySelector(`.scene-row[data-id="${CSS.escape(id)}"]`)?.focus();
     }
 
@@ -341,7 +341,7 @@
       });
       if (!confirmed) return;
       const index = this.scenes.indexOf(scene);
-      if (await this.mutate(d => window.Structure.removeScene(d, scene.id).data, { render: false })) {
+      if (await this.mutate(d => window.Structure.removeScene(d, scene.id).data, { render: false, label: 'suppression de scène' })) {
         this.selectedId = this.scenes[Math.min(index, this.scenes.length - 1)]?.id || null;
         this.render();
       }
@@ -356,7 +356,7 @@
         confirmLabel: 'Créer les scènes'
       });
       if (!confirmed) return;
-      await this.mutate(d => proposals.reduce((acc, p) => window.Structure.addScene(acc, p).data, d));
+      await this.mutate(d => proposals.reduce((acc, p) => window.Structure.addScene(acc, p).data, d), { label: `création de ${proposals.length} scène(s)` });
     }
 
     onInput(e) {
@@ -365,7 +365,8 @@
       const id = this.selected.id;
       const value = e.target.value;
       // La saisie met à jour le modèle tout de suite (enregistrement différé) sans redessiner la fiche
-      this.app.mutateProject(d => window.Structure.updateScene(d, id, { [field]: value }).data).then(ok => {
+      this.app.mutateProject(d => window.Structure.updateScene(d, id, { [field]: value }).data,
+        { label: 'saisie dans la scène', coalesce: `scene:${id}:${field}` }).then(ok => {
         if (!ok) return;
         const row = this.root.querySelector(`.scene-row[data-id="${CSS.escape(id)}"]`);
         const index = this.scenes.findIndex(s => s.id === id);
@@ -384,15 +385,15 @@
         this.filter = t.value;
         this.render();
       } else if (t.dataset.field === 'status' || t.dataset.field === 'doc') {
-        await this.mutate(d => S.updateScene(d, scene.id, { [t.dataset.field]: t.value }).data);
+        await this.mutate(d => S.updateScene(d, scene.id, { [t.dataset.field]: t.value }).data, { label: t.dataset.field === 'status' ? 'changement de statut' : 'lien de document' });
       } else if (t.dataset.character !== undefined) {
         const set = new Set((scene.characters || []).map(String));
         if (t.checked) set.add(t.dataset.character); else set.delete(t.dataset.character);
-        await this.mutate(d => S.updateScene(d, scene.id, { characters: [...set] }).data);
+        await this.mutate(d => S.updateScene(d, scene.id, { characters: [...set] }).data, { label: 'personnages de la scène' });
       } else if (t.dataset.page !== undefined) {
         const set = new Set((scene.pages || []).map(String));
         if (t.checked) set.add(t.dataset.page); else set.delete(t.dataset.page);
-        await this.mutate(d => S.updateScene(d, scene.id, { pages: [...set] }).data);
+        await this.mutate(d => S.updateScene(d, scene.id, { pages: [...set] }).data, { label: 'pages de la scène' });
       }
     }
 
@@ -441,7 +442,7 @@
         e.preventDefault();
         const to = this.scenes.findIndex(s => s.id === row.dataset.id);
         this.dragId = null;
-        await this.mutate(d => window.Structure.moveScene(d, id, to).data);
+        await this.mutate(d => window.Structure.moveScene(d, id, to).data, { label: 'déplacement de scène' });
       });
     }
   }

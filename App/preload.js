@@ -39,6 +39,8 @@ contextBridge.exposeInMainWorld('api', {
   onPartnerIntent: (callback) => ipcRenderer.on('partner-intent', (event, intent) => callback(intent)),
   onShowShortcuts: (callback) => ipcRenderer.on('show-shortcuts', callback),
   onWorkspace: (callback) => ipcRenderer.on('workspace', (event, name) => callback(name)),
+  onMenuUndo: (callback) => ipcRenderer.on('menu-undo', callback),
+  onMenuRedo: (callback) => ipcRenderer.on('menu-redo', callback),
 
   // Platform info
   platform: process.platform

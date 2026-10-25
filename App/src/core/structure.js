@@ -117,6 +117,26 @@
     return scenesOf(data).find(s => s.doc === docName && normalize(s.heading) === heading) || null;
   }
 
+  // Titres de section d'un document avant / après une modification. Si un seul titre a changé
+  // (même nombre de sections, sans homonyme), les scènes liées à l'ancien titre suivent le nouveau ;
+  // leur titre aussi, s'il était identique à l'ancien titre de section. Sinon rien ne change.
+  function followHeadingRename(data, docName, before, after) {
+    const none = { data, renamed: [] };
+    if (!docName || !Array.isArray(before) || !Array.isArray(after) || before.length !== after.length) return none;
+    const changed = before.map((title, i) => [title, after[i]]).filter(([a, b]) => normalize(a) !== normalize(b));
+    if (changed.length !== 1) return none;
+    const [from, to] = changed[0];
+    const count = (list, title) => list.filter(t => normalize(t) === normalize(title)).length;
+    if (!normalize(to) || count(before, from) > 1 || count(after, to) > 1) return none;
+    const renamed = [];
+    const list = scenesOf(data).map(s => {
+      if (s.doc !== docName || normalize(s.heading) !== normalize(from)) return s;
+      renamed.push(s.id);
+      return { ...s, heading: to, ...(normalize(s.title) === normalize(from) ? { title: to } : {}) };
+    });
+    return renamed.length ? { data: withScenes(data, list), renamed } : none;
+  }
+
   // --- Manga : scène / page / double page ---
 
   const pagesOf = (data) => (Array.isArray(data?.script) ? data.script.filter(isObject) : []);
@@ -212,7 +232,7 @@
   return {
     STATUSES, statusLabel, cleanFields, createScene,
     addScene, updateScene, moveScene, moveSceneBy, removeScene,
-    charactersOf, scenesForCharacter, sceneAt,
+    charactersOf, scenesForCharacter, sceneAt, followHeadingRename,
     groupSpreads, setPageSpread, pagesOfScene, speakersOfPage,
     proposeScenesFromSequences, proposeScenesFromHeadings
   };

@@ -273,7 +273,7 @@
           this.render(); return;
         case 'confirm-role': {
           const id = this.selectedId;
-          if (await this.app.mutateProject(d => B.confirmSuggestedRole(d, id).data)) { this.renderIndex(); this.renderSheet(); }
+          if (await this.app.mutateProject(d => B.confirmSuggestedRole(d, id).data, { label: 'confirmation du rôle' })) { this.renderIndex(); this.renderSheet(); }
           return;
         }
         case 'delete': return this.deleteSelected();
@@ -305,7 +305,7 @@
       const ok = await this.app.mutateProject(d => {
         result = this.mode === 'add' ? B.addEntry(d, kind, fields) : B.updateEntry(d, kind, this.selectedId, fields);
         return result.error ? null : result.data;
-      });
+      }, { label: this.mode === 'add' ? `ajout de ${this.spec.singular}` : 'modification de fiche' });
       if (result?.error) {
         this.formError = { message: result.error, duplicateId: result.duplicate?.id || null };
         const sheet = this.root.querySelector('#bibleSheet');
@@ -329,14 +329,14 @@
       const linked = this.kind === 'characters' ? window.Structure.scenesForCharacter(this.data, entry.id).length : 0;
       const { confirmed } = await this.app.showConfirmDialog({
         title: `Supprimer « ${B.titleOf(this.kind, entry)} »`,
-        message: `La fiche sera retirée de la Bible. Les documents ne sont pas modifiés.` +
+        message: `La fiche sera retirée de la Bible (Ctrl+Z pour annuler). Les documents ne sont pas modifiés.` +
           (linked ? `\n\n${linked} scène(s) la citent : leurs liens restent, signalés comme « fiche supprimée ».` : '') +
-          '\n\nSuppression définitive : seule la version écrite juste avant reste dans _PROJECT.json.bak.',
+          '',
         confirmLabel: 'Supprimer', cancelLabel: 'Garder'
       });
       if (!confirmed) return;
       const kind = this.kind;
-      if (await this.app.mutateProject(d => B.removeEntry(d, kind, entry.id).data)) {
+      if (await this.app.mutateProject(d => B.removeEntry(d, kind, entry.id).data, { label: 'suppression de fiche' })) {
         this.selectedId = null;
         this.render();
       }

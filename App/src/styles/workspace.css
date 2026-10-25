@@ -226,7 +226,7 @@ details[open] > summary.nav-heading::after { content: '−'; }
 .toolbar-toggle[aria-pressed="true"] { color: var(--text-primary); }
 .toolbar-toggle[aria-pressed="false"] { color: var(--text-muted); }
 #btnFocus[aria-pressed="true"] { color: var(--accent); }
-.toolbar-btn.active, .editor-mode-btn.active { background: none; color: var(--text-primary); box-shadow: inset 0 -2px 0 var(--accent); border-radius: 0; }
+.toolbar-btn.active { background: none; color: var(--text-primary); box-shadow: inset 0 -2px 0 var(--accent); border-radius: 0; }
 .word-count { background: none; padding: 0 4px; font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .workspace-switch { display: flex; margin-left: 6px; border-left: 1px solid var(--border); padding-left: 10px; }
 .workspace-tab {
@@ -473,7 +473,7 @@ body.focus-mode .editor-area { max-width: none; margin: 0; }
 body.focus-mode .editor-toolbar { opacity: 0.25; transition: opacity 0.2s ease; border-bottom-color: transparent; }
 body.focus-mode .editor-toolbar:hover, body.focus-mode .editor-toolbar:focus-within { opacity: 1; }
 body.focus-mode .editor-toolbar .workspace-switch,
-body.focus-mode .editor-toolbar .editor-mode-btn,
+body.focus-mode .editor-toolbar .toolbar-select,
 body.focus-mode #btnImport, body.focus-mode #btnSync, body.focus-mode #btnToggleNav { display: none; }
 body.focus-mode .pane-header { display: none; }
 body.focus-mode #notesEditor { padding-top: 12vh; }
@@ -485,9 +485,33 @@ body.focus-mode .focus-exit { display: inline-flex; }
   .view-main { padding: 22px 20px 40px; }
   .workspace-tab { padding: 0 8px; }
 }
-@media (max-width: 1080px) {
-  .workspace-tab .icon, #btnImport .icon, #btnSync .icon { display: none; }
+/* Barre d'outils sur une ligne : libellés d'import et d'analyse réduits à leur icône sous 1 500 px */
+.toolbar-select { height: 30px; padding: 0 6px; font-size: 13px; background: transparent; }
+@media (max-width: 1499px) {
+  #btnImport .btn-label, #btnSync .btn-label { display: none; }
+  #btnImport, #btnSync { width: 30px; padding: 0; }
 }
+@media (max-width: 1080px) {
+  .workspace-tab .icon { display: none; }
+}
+#btnUndo { margin-left: auto; font-size: 12px; }
+/* Zone d'écriture étroite (panneaux ouverts) : onglets sans icône, sélecteur d'affichage resserré */
+.editor-area { container-type: inline-size; }
+.toolbar-select { max-width: 170px; }
+@container (max-width: 900px) {
+  .workspace-tab .icon { display: none; }
+  .workspace-tab { padding: 0 8px; }
+  .editor-toolbar { gap: 4px 6px; }
+}
+@container (max-width: 760px) {
+  .editor-toolbar { padding-left: 6px; padding-right: 6px; gap: 4px; }
+  .workspace-switch { margin-left: 2px; padding-left: 4px; }
+  .workspace-tab { padding: 0 6px; }
+  .toolbar-select { max-width: 124px; }
+  .toolbar-btn { min-width: 26px; padding: 0 4px; }
+  .toolbar-btn.btn-icon-only, #btnImport, #btnSync { width: 28px; }
+}
+body.focus-mode #btnUndo { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   .scene-move, body.focus-mode .editor-toolbar { transition: none; }

@@ -106,6 +106,18 @@ Les projets réels sont encore au format v1 : la migration est proposée à leur
   - 91 tests `node:test` (+ structure, bible). Banc Electron sur API simulée (fichiers en mémoire, aucun fichier réel,
     aucune IA) : 29 contrôles OK, 0 erreur console ; captures 1000 / 1400 / 1920 px, clair et sombre, focus,
     panneaux fermés, projet v1 en lecture seule.
+- Consolidation (2026-10-25) :
+  - Annuler / Rétablir pour Structure et Bible : Édition › Annuler (Ctrl+Z) annule le texte dans un champ de saisie,
+    sinon la dernière modification du projet (100 étapes, saisies d'un même champ regroupées) ; bouton
+    « Annuler : … » dans la barre d'état. Pile vidée au changement de projet et dès que le projet est remplacé
+    ailleurs (analyse, import, migration, restauration).
+  - Lien scène ↔ section : renommer un titre `##` dans l'éditeur fait suivre les scènes liées (et leur titre s'il
+    était identique) ; cas ambigus (plusieurs titres changés, homonymes, section ajoutée) laissés tels quels.
+  - Barre d'outils d'Écrire sur une ligne de 1 000 à 1 920 px : affichage du document en liste déroulante,
+    Importer / Analyser en icônes sous 1 500 px, compteur de mots dans la barre d'état.
+  - `manga-analysis.js` testé (9 tests) ; corrigé : les événements de chronologie détectés n'avaient pas de
+    `period` et étaient tous écartés par la validation.
+  - 102 tests `node:test` ; banc Electron : 35 contrôles OK, 0 erreur console.
 
 ## Next
 - **Utilisateur** : révoquer l'ancienne clé OpenAI ; tester à la main l'incrément 1.
@@ -131,10 +143,9 @@ Les projets réels sont encore au format v1 : la migration est proposée à leur
 - Parcours de migration/restauration non testés à la main dans l'UI.
 - CSP : `unsafe-inline` encore nécessaire (styles/handlers en ligne de l'ancien code).
 - Projets/config dépendent du dossier d'installation ; `assets/icon.png` absent (build).
-- `app.js` encore gros (1 815 lignes) ; `manga-analysis.js` (heuristiques) non testé unitairement.
-- Barre d'outils d'Écrire sur deux lignes vers 1 400 px avec les deux panneaux ouverts (passage à la ligne voulu).
-- Scènes ancrées sur le titre de section : renommer le titre `##` dans le texte casse le lien (signalé à l'ouverture).
-- Pas d'annulation (Ctrl+Z) pour les modifications de Structure/Bible ; suppression = définitive (`.bak` = écriture précédente).
+- `app.js` encore gros (~1 900 lignes) ; heuristiques de `manga-analysis.js` taillées pour les projets existants (noms en dur).
+- Lien scène ↔ section : un renommage fait hors de l'app, ou plusieurs titres changés d'un coup, n'est pas suivi (signalé à l'ouverture de la scène).
+- Annulation Structure/Bible en mémoire seulement : perdue à la fermeture ou au changement de projet.
 
 ## Important decisions
 - Ordre de travail : celui du prompt (fiabilité → modèle → Écrire/partenaire → Structure/Bible/visuel).

@@ -38,6 +38,12 @@ class WritingPartnerApp {
     // Écriture différée de _PROJECT.json, liée au projet modifié
     this.pendingProject = null;
     this.projectSaveTimer = null;
+    // Annulation des modifications de Structure et Bible (versions précédentes du projet, en mémoire)
+    this.undoStack = [];
+    this.redoStack = [];
+    this.undoTip = null;
+    // Titres de section du document ouvert, pour faire suivre les scènes liées quand un titre change
+    this.docHeadings = [];
     
     // Init
     this.init();
@@ -182,6 +188,7 @@ class WritingPartnerApp {
 
   // Tout ce qui dépend des données du projet
   refreshViews() {
+    this.renderUndoButton();
     this.populateTodos();
     this.renderScript();
     this.structure.render();
@@ -263,7 +270,7 @@ class WritingPartnerApp {
       const r = window.Structure.addScene(d, { title: section.title, doc, heading: section.title, status: 'draft' });
       created = r.scene;
       return r.data;
-    });
+    }, { label: 'création de scène' });
     if (ok) {
       this.structure.render();
       this.addChatMessage(`Scène « ${created.title} » créée et liée à cette section. Décrivez-la dans Structure.`, 'info');
@@ -278,6 +285,8 @@ class WritingPartnerApp {
     window.api.onToggleTheme(() => this.toggleTheme());
     window.api.onToggleFocus(() => this.toggleFocus());
     window.api.onWorkspace((name) => this.setWorkspace(name));
+    window.api.onMenuUndo(() => this.handleUndoCommand(false));
+    window.api.onMenuRedo(() => this.handleUndoCommand(true));
     window.api.onTogglePartner(() => this.setPanelVisible('partner', document.body.classList.contains('partner-hidden')));
     window.api.onPartnerIntent((intent) => this.partner.focus(intent));
     window.api.onShowShortcuts(() => this.toggleHelp(true));
@@ -408,6 +417,8 @@ class WritingPartnerApp {
     // Format du fichier : ancien format → migration proposée (rien n'est écrit sans accord),
     // format inconnu ou plus récent → lecture seule
     this.pendingMigration = null;
+    this.undoStack = [];
+    this.redoStack = [];
     if (!this.projectLoadError) {
       const plan = window.ProjectSchema.planMigration(this.projectData);
       if (plan.status === 'too-new' || plan.status === 'invalid') {
@@ -629,6 +640,8 @@ class WritingPartnerApp {
     this.currentProject = null;
     this.projectLoadError = null;
     this.pendingMigration = null;
+    this.undoStack = [];
+    this.redoStack = [];
     this.projectData = this.getEmptyProjectData();
     document.getElementById('currentProjectName').textContent = 'Aucun projet';
     document.getElementById('todosNav').classList.add('hidden');
@@ -734,6 +747,8 @@ class WritingPartnerApp {
       this.pendingNotes = { project: this.currentProject, doc: this.currentDoc, content: notesEditor.value };
       this.setSaveState('dirty');
       this.onCursorMove();
+      clearTimeout(this.headingTimer);
+      this.headingTimer = setTimeout(() => this.trackHeadings(), 300);
 
       clearTimeout(this.notesSaveTimer);
       this.notesSaveTimer = setTimeout(() => this.flushNotes(), 2000);
@@ -747,14 +762,7 @@ class WritingPartnerApp {
       if (btn && btn.dataset.doc !== this.currentDoc?.name) this.openDocument(btn.dataset.doc);
     });
     
-    // Editor mode buttons
-    document.querySelectorAll('.editor-mode-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
-        document.querySelectorAll('.editor-mode-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        this.setEditorMode(btn.dataset.mode);
-      });
-    });
+    document.getElementById('editorMode').addEventListener('change', (e) => this.setEditorMode(e.target.value));
     
     // Sync button
     document.getElementById('btnSync').addEventListener('click', () => this.syncNotesToScript());
@@ -775,11 +783,7 @@ class WritingPartnerApp {
     this.editorMode = mode;
     const dual = document.getElementById('dualEditor');
     dual.className = `dual-editor mode-${mode}`;
-    document.querySelectorAll('.editor-mode-btn').forEach(b => {
-      const active = b.dataset.mode === mode;
-      b.classList.toggle('active', active);
-      b.setAttribute('aria-pressed', String(active));
-    });
+    document.getElementById('editorMode').value = mode;
     try { localStorage.setItem('editor.mode', mode); } catch (e) {}
   }
 
@@ -841,6 +845,8 @@ class WritingPartnerApp {
     editor.setSelectionRange(pos, pos);
     this.updateWordCount();
     this.renderDocumentsList();
+    clearTimeout(this.headingTimer);
+    this.docHeadings = window.PartnerContext.listSections(editor.value).map(sec => sec.title);
     this.updatePosition();
     this.partner.rememberDocument(doc.name, pos, { persist: flush });
     this.partner.refreshContext();
@@ -994,22 +1000,6 @@ class WritingPartnerApp {
     editor.dispatchEvent(new Event('input'));
   }
 
-  navigateToPage(pageNum) {
-    // Activer le mode scénario si nécessaire
-    this.setEditorMode('script');
-    document.querySelectorAll('.editor-mode-btn').forEach(b => b.classList.remove('active'));
-    document.querySelector('[data-mode="script"]').classList.add('active');
-    
-    // Trouver et mettre en surbrillance la page
-    const scriptContent = document.getElementById('scriptContent');
-    const targetPage = scriptContent.querySelector(`[data-page="${pageNum}"]`);
-    
-    if (targetPage) {
-      targetPage.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      targetPage.classList.add('highlight-search');
-      setTimeout(() => targetPage.classList.remove('highlight-search'), 3000);
-    }
-  }
   
   // === Synchronisation Notes → Script ===
   async syncNotesToScript() {
@@ -1245,21 +1235,105 @@ RÈGLES:
 
   // Applique une modification venant d'une vue : `mutator` reçoit le projet et renvoie sa nouvelle
   // version (ou null pour ne rien changer). Refusée si le projet est illisible ou à migrer.
-  async mutateProject(mutator, { delay = 800 } = {}) {
+  // `label` nomme la modification pour « Annuler » ; des saisies successives de même `coalesce`
+  // (un même champ, à moins de 2 s d'intervalle) forment une seule étape d'annulation.
+  async mutateProject(mutator, { delay = 800, label = 'modification', coalesce = null } = {}) {
     if (this.pendingMigration && !(await this.ensureMigrated())) return false;
     const reason = this.readOnlyReason();
     if (reason) {
       this.addChatMessage(reason, 'error');
       return false;
     }
-    const next = mutator(this.projectData);
-    if (!next || next === this.projectData) return false;
+    const previous = this.projectData;
+    const next = mutator(previous);
+    if (!next || next === previous) return false;
+    this.syncUndoTip();
+    const top = this.undoStack[this.undoStack.length - 1];
+    if (coalesce && top && top.coalesce === coalesce && Date.now() - top.at < 2000) {
+      top.at = Date.now();
+    } else {
+      this.undoStack.push({ data: previous, label, coalesce, at: Date.now() });
+      if (this.undoStack.length > 100) this.undoStack.shift();
+    }
+    this.redoStack = [];
     this.projectData = next;
+    this.undoTip = next;
+    this.afterProjectChange(delay);
+    return true;
+  }
+
+  afterProjectChange(delay = 800) {
     this.scheduleProjectSave(delay);
     this.populateTodos();
     this.updatePosition();
     this.partner.refreshContext();
+    this.renderUndoButton();
+  }
+
+  // Le projet a été remplacé hors des vues (analyse, import, migration, restauration) :
+  // les versions gardées pour l'annulation ne s'appliquent plus.
+  syncUndoTip() {
+    if (this.undoTip !== this.projectData) {
+      this.undoStack = [];
+      this.redoStack = [];
+      this.undoTip = this.projectData;
+    }
+  }
+
+  async undoProject(redo = false) {
+    this.syncUndoTip();
+    const from = redo ? this.redoStack : this.undoStack;
+    const to = redo ? this.undoStack : this.redoStack;
+    if (!from.length || this.readOnlyReason()) {
+      this.renderUndoButton();
+      return false;
+    }
+    const entry = from.pop();
+    to.push({ data: this.projectData, label: entry.label, coalesce: null, at: 0 });
+    this.projectData = entry.data;
+    this.undoTip = entry.data;
+    this.afterProjectChange();
+    this.structure.render();
+    this.bible.render();
+    this.addChatMessage(`${redo ? 'Rétabli' : 'Annulé'} : ${entry.label}.`, 'info');
     return true;
+  }
+
+  renderUndoButton() {
+    const btn = document.getElementById('btnUndo');
+    const top = this.undoTip === this.projectData ? this.undoStack[this.undoStack.length - 1] : null;
+    btn.classList.toggle('hidden', !top);
+    if (top) {
+      btn.textContent = `Annuler : ${top.label}`;
+      btn.title = `Annuler « ${top.label} » (Ctrl+Z hors d'un champ de saisie)`;
+    }
+  }
+
+  // Menu Édition › Annuler / Rétablir : dans un champ de saisie, l'annulation du texte ;
+  // ailleurs, l'annulation des modifications de Structure et Bible.
+  handleUndoCommand(redo) {
+    const el = document.activeElement;
+    const editable = el && (el.tagName === 'TEXTAREA' || el.isContentEditable ||
+      (el.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit'].includes(el.type)));
+    if (editable) document.execCommand(redo ? 'redo' : 'undo');
+    else this.undoProject(redo);
+  }
+
+  // Un titre de section renommé dans le document : les scènes liées suivent. Pas d'étape d'annulation
+  // à part : annuler la frappe rétablit l'ancien titre, et les scènes le suivent de nouveau.
+  trackHeadings() {
+    if (!this.currentDoc) return;
+    const after = window.PartnerContext.listSections(this.editor.value).map(sec => sec.title);
+    const before = this.docHeadings;
+    this.docHeadings = after;
+    if (this.readOnlyReason() || JSON.stringify(before) === JSON.stringify(after)) return;
+    const { data, renamed } = window.Structure.followHeadingRename(this.projectData, this.currentDoc.name, before, after);
+    if (!renamed.length) return;
+    const tipWasCurrent = this.undoTip === this.projectData;
+    this.projectData = data;
+    if (tipWasCurrent) this.undoTip = data;
+    this.afterProjectChange();
+    this.structure.render();
   }
 
   // Points à traiter, dans la navigation ; les doublons possibles sont signalés, jamais fusionnés

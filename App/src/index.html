@@ -66,10 +66,13 @@
             <button class="workspace-tab" role="tab" aria-selected="false" data-workspace="bible" title="Bible (Ctrl+Maj+3)"><span class="icon" data-icon="book"></span>Bible</button>
           </div>
         </div>
-        <div class="toolbar-group write-only" aria-label="Affichage du document">
-          <button class="toolbar-btn editor-mode-btn active" data-mode="notes" title="Le document seul, au centre">Document</button>
-          <button class="toolbar-btn editor-mode-btn" data-mode="split" title="Le document et l'aperçu structuré côte à côte">Document + aperçu</button>
-          <button class="toolbar-btn editor-mode-btn" data-mode="script" title="L'aperçu structuré seul">Aperçu</button>
+        <div class="toolbar-group write-only">
+          <label class="visually-hidden" for="editorMode">Affichage du document</label>
+          <select id="editorMode" class="select-compact toolbar-select" title="Affichage : le document seul, avec l'aperçu structuré, ou l'aperçu seul">
+            <option value="notes">Document seul</option>
+            <option value="split">Document + aperçu</option>
+            <option value="script">Aperçu seul</option>
+          </select>
         </div>
         <div class="toolbar-group write-only" aria-label="Mise en forme">
           <button class="toolbar-btn" data-action="bold" title="Gras" aria-label="Gras"><b>B</b></button>
@@ -79,9 +82,8 @@
         </div>
         <div class="toolbar-spacer"></div>
         <div class="toolbar-group write-only">
-          <button class="toolbar-btn" id="btnImport" title="Importer une Story Bible (.md) dans la Bible ; rien n'est supprimé"><span class="icon" data-icon="import"></span>Importer</button>
-          <button class="toolbar-btn" id="btnSync" title="Analyser _NOTES.md et proposer des compléments ; rien n'est supprimé"><span class="icon" data-icon="analyse"></span>Analyser les notes</button>
-          <span class="word-count" id="wordCount">0 mot</span>
+          <button class="toolbar-btn" id="btnImport" aria-label="Importer une Story Bible" title="Importer une Story Bible (.md) dans la Bible ; rien n'est supprimé"><span class="icon" data-icon="import"></span><span class="btn-label">Importer</span></button>
+          <button class="toolbar-btn" id="btnSync" aria-label="Analyser les notes" title="Analyser _NOTES.md et proposer des compléments ; rien n'est supprimé"><span class="icon" data-icon="analyse"></span><span class="btn-label">Analyser les notes</span></button>
         </div>
         <div class="toolbar-group">
           <button class="toolbar-btn btn-icon-only" id="btnFocus" aria-pressed="false" title="Mode focus (Ctrl+Maj+F, Échap pour sortir)" aria-label="Mode focus"><span class="icon" data-icon="focus"></span></button>
@@ -126,6 +128,8 @@
       <div class="editor-statusbar">
         <span id="saveStatus" role="status" aria-live="polite">Enregistré</span>
         <span id="syncStatus">Non analysé</span>
+        <span class="word-count write-only" id="wordCount">0 mot</span>
+        <button class="btn-link hidden" id="btnUndo"></button>
         <button class="btn-link focus-exit" id="btnExitFocus">Quitter le mode focus (Échap)</button>
       </div>
     </main>
@@ -198,6 +202,8 @@
             <h4>Projet</h4>
             <div class="shortcut"><kbd>Ctrl+N</kbd> Nouveau projet</div>
             <div class="shortcut"><kbd>Ctrl+S</kbd> Enregistrer maintenant</div>
+            <div class="shortcut"><kbd>Ctrl+Z</kbd> Annuler (le texte dans un champ, sinon Structure / Bible)</div>
+            <div class="shortcut"><kbd>Ctrl+Y</kbd> Rétablir</div>
           </div>
           <div class="shortcut-category">
             <h4>Espaces</h4>

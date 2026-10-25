@@ -77,8 +77,10 @@ function getMenuTemplate() {
     {
       label: 'Édition',
       submenu: [
-        { role: 'undo', label: 'Annuler' },
-        { role: 'redo', label: 'Rétablir' },
+        // Le renderer choisit : annulation du texte dans un champ, sinon de la Structure / Bible
+        { label: 'Annuler', accelerator: 'CmdOrCtrl+Z', click: () => mainWindow.webContents.send('menu-undo') },
+        { label: 'Rétablir', accelerator: 'CmdOrCtrl+Y', click: () => mainWindow.webContents.send('menu-redo') },
+        { label: 'Rétablir', accelerator: 'CmdOrCtrl+Shift+Z', visible: false, click: () => mainWindow.webContents.send('menu-redo') },
         { type: 'separator' },
         { role: 'cut', label: 'Couper' },
         { role: 'copy', label: 'Copier' },
