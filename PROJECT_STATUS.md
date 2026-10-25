@@ -135,6 +135,9 @@ Les projets réels sont encore au format v1 : la migration est proposée à leur
   raccourcis Bureau + menu Démarrer qui lancent `electron.exe` sur le dossier `App` (pas de console), créés par
   `App/Creer-Raccourcis.ps1` (ou `CreerRaccourciBureau.bat`) ; fenêtre « Partner », identité Windows
   `com.partner.writing`, une seule instance (relancer ramène la fenêtre). Vérifié : ouverture par l'Explorateur OK.
+- Correctif clé API (2026-10-26) : le renommage `app.setName('Partner')` du lanceur avait déplacé le dossier de
+  données (`%APPDATA%\Partner`), rendant la clé enregistrée indéchiffrable (« Aucune clé OpenAI enregistrée »).
+  Dossier fixé à `%APPDATA%\writing-partner` ; une clé illisible est désormais signalée comme telle.
 
 ## Next
 - **Utilisateur** : révoquer l'ancienne clé OpenAI ; tester à la main l'incrément 1.

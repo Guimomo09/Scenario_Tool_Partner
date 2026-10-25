@@ -20,8 +20,10 @@ const INBOX_PATH = path.join(PARTNER_PATH, 'Inbox');
 // Désactiver le cache en développement
 app.commandLine.appendSwitch('disable-http-cache');
 
+// Dossier de données fixe : il contient la clé (Local State) qui déchiffre les clés API enregistrées.
+// Il ne doit jamais dépendre du nom de l'app, sinon les clés deviennent illisibles.
+app.setPath('userData', path.join(app.getPath('appData'), 'writing-partner'));
 // Identité Windows : la fenêtre se regroupe sous l'icône Partner dans la barre des tâches
-app.setName('Partner');
 if (process.platform === 'win32') app.setAppUserModelId('com.partner.writing');
 // Une seule instance : relancer depuis le raccourci ramène la fenêtre déjà ouverte
 if (!app.requestSingleInstanceLock()) {
@@ -338,13 +340,15 @@ function encryptKey(plainKey) {
   return safeStorage.encryptString(plainKey).toString('base64');
 }
 
-function getApiKey(provider) {
+// Clé déchiffrée, ou la raison exacte de son absence (non enregistrée / illisible)
+function readApiKey(provider) {
   const enc = readSettingsFile().providers?.[provider]?.apiKeyEnc;
-  if (!enc) return '';
+  if (!enc) return { key: '', error: null };
   try {
-    return safeStorage.decryptString(Buffer.from(enc, 'base64'));
+    return { key: safeStorage.decryptString(Buffer.from(enc, 'base64')), error: null };
   } catch (e) {
-    return '';
+    const label = AI.PROVIDERS[provider]?.label || provider;
+    return { key: '', error: `La clé ${label} enregistrée ne peut pas être déchiffrée sur ce poste ou ce profil. Saisissez-la de nouveau dans Paramètres.` };
   }
 }
 
@@ -382,12 +386,14 @@ handle('ai-chat', async (event, requestId, payload) => {
   const stored = readSettingsFile();
   const provider = Settings.activeProvider(stored);
   if (provider === 'none') return { success: false, error: 'Aucun fournisseur IA choisi (Paramètres).' };
+  const { key, error: keyError } = readApiKey(provider);
+  if (keyError) return { success: false, error: keyError };
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10 * 60 * 1000);
   aiRequests.set(requestId, controller);
   try {
     const result = await AI.chat(provider, {
-      apiKey: getApiKey(provider),
+      apiKey: key,
       model: Settings.modelFor(stored, provider),
       system: payload?.system,
       messages: payload?.messages,
@@ -408,7 +414,9 @@ handle('ai-cancel', async (event, requestId) => {
 
 handle('ai-list-models', async (event, provider) => {
   if (!AI.isProvider(provider)) return { success: false, error: 'Fournisseur inconnu.' };
-  return AI.listModels(provider, { apiKey: getApiKey(provider) });
+  const { key, error } = readApiKey(provider);
+  if (error) return { success: false, error };
+  return AI.listModels(provider, { apiKey: key });
 });
 
 // Créer un dossier (avec parents)
