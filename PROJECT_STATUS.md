@@ -3,7 +3,7 @@
 ## Current state
 Refonte en cours selon le prompt validé
 (`C:\Users\charl\Documents\Codex\2026-10-25\je-x20\outputs\Prompt-Claude-Refonte-Partner.md`, audit à côté).
-**Incréments 1/4 (fiabilité), 2/4 (modèle de données) et 3/4 (Écrire + partenaire) terminés.** Prochain : incrément 4 (Structure, Bible, refonte graphique).
+**Les 4 incréments du prompt sont livrés** (fiabilité, modèle de données, Écrire + partenaire, Structure/Bible/refonte graphique).
 Les projets réels sont encore au format v1 : la migration est proposée à leur ouverture (non faite).
 
 ### Histoires
@@ -74,15 +74,48 @@ Les projets réels sont encore au format v1 : la migration est proposée à leur
   - Parcours vérifié dans Electron sur API simulée (projets fictifs en mémoire, IA simulée, aucun fichier réel) :
     23 contrôles OK, 0 erreur console ; captures 1000 / 1400 / 1920 px, sombre et clair, panneaux ouverts/fermés.
 
+- Incrément 4 (2026-10-25) :
+  - Trois espaces : Écrire / Structure / Bible (barre d'outils, menu Affichage, Ctrl+Maj+1/2/3). Navigation gauche :
+    Documents, Scènes (numérotées, statut), À traiter (repliable). Anciens onglets du panneau gauche retirés.
+  - Structure (`core/structure.js`, `components/structure-view.js`) : collection `scenes` (id `sc_`, schéma v2 inchangé,
+    liste absente = vide). Scène : titre, résumé, personnages (par id), objectif, conflit, changement, statut
+    (Idée/Brouillon/Révisée/Finale), notes, document + section liés, pages. Tous les champs facultatifs.
+    Conducteur numéroté, filtre par statut, réordonnancement (boutons, Alt+↑/↓, glisser) sans changer d'identifiant.
+    Création proposée (avec confirmation) depuis les séquences du script ou les titres `##` du document ouvert ;
+    « Créer une scène ici » depuis Écrire ; « Écrire cette scène » ouvre le document à la section.
+    Manga : pages par séquence, double page détectée (« PAGE 12-13 ») ou marquée par l'auteur (`spread`, conservé
+    par la synchro). Lien vers une fiche supprimée : signalé, jamais retiré en silence.
+  - Bandeau : document › section › « Scène 03 — titre · statut ». Le partenaire reçoit la fiche de la scène active
+    (élément « Scène » visible et décochable dans le contexte, balise `<scene>` traitée comme matériau).
+  - Bible (`core/bible.js`, `components/bible-view.js`) : Personnages, Lieux, Systèmes, Chronologie, Références
+    (+ « Analyse automatique » en lecture seule si présente). Ajout/modification manuels (champs décrits seulement,
+    autres champs conservés, listes d'objets extraites non éditables), nom existant refusé avec lien vers la fiche,
+    rôle suggéré confirmé sur demande, scènes où paraît le personnage, champs extraits en lecture seule. Rendu échappé.
+  - Écritures de `_PROJECT.json` : différées (800 ms), liées au projet d'origine, enchaînées ; vidées au changement
+    de projet, à Ctrl+S et à la fermeture (plus d'écriture inutile ni d'erreur à la fermeture d'un projet v1).
+    Projet illisible / à migrer : Structure et Bible en lecture seule, bandeau « Examiner la mise à jour du format ».
+  - Refonte graphique : palette ivoire/encre/brique/olive (contrastes vérifiés ≥ 4,5:1 pour le texte), thème sombre
+    charbon chaud (thème clair par défaut si aucun choix enregistré), Source Serif 4 / Source Sans 3 embarquées
+    (`src/fonts/`, OFL), icônes SVG (`components/icons.js`), plus d'emoji dans l'interface, coins 2–6 px, filets.
+  - Mode focus revu : bandeau et panneaux masqués, barre d'outils estompée, Échap ou bouton du bas pour sortir
+    (panneaux rétablis), Ctrl+Maj+P ouvre le partenaire par-dessus.
+  - Dialogues : piège du focus (Tab), saisie de nom sans styles en ligne. Aperçu structuré : titre, synopsis, arcs,
+    points à traiter désormais échappés.
+  - `app.js` découpé : 3 878 → 1 815 lignes (`story-bible-import.js`, `manga-analysis.js` en mixins ; anciens rendus
+    des fiches supprimés, remplacés par les vues).
+  - 91 tests `node:test` (+ structure, bible). Banc Electron sur API simulée (fichiers en mémoire, aucun fichier réel,
+    aucune IA) : 29 contrôles OK, 0 erreur console ; captures 1000 / 1400 / 1920 px, clair et sombre, focus,
+    panneaux fermés, projet v1 en lecture seule.
+
 ## Next
 - **Utilisateur** : révoquer l'ancienne clé OpenAI ; tester à la main l'incrément 1.
 - **Utilisateur** : ouvrir chaque projet, lire l'aperçu, accepter (ou non) la migration ; relancer
   « Synchroniser » sur Origin Zero pour obtenir les blocs ordonnés (les anciennes pages restent sinon en v1 d'affichage).
 - **Utilisateur** : Paramètres › choisir le fournisseur, vérifier le modèle (bouton « Modèles disponibles »),
   puis un premier vrai échange sur un passage (premier appel payant, non fait ici).
-- Incrément 4 : Structure (scènes : résumé, personnages, objectif, conflit, changement, statut, réordonnancement ;
-  manga scène/page/double page) + Bible (fiches, ajout manuel), refonte graphique (palette ivoire/encre/brique,
-  Source Serif/Sans embarquées, icônes sans emoji), focus mode revu, découpage d'`app.js`.
+- **Utilisateur** : tester à la main Structure, Bible et le mode focus sur un vrai projet (après migration).
+- Suite possible : diffusion des réponses IA en continu, historique des conversations consultable, création/renommage
+  de documents, fusion d'alias assistée, retrait de `unsafe-inline` (CSP), espace de travail hors dossier d'installation.
 - Origin Zero : choisir la source de vérité (Scenario_Manga vs Projets) avant toute migration.
 
 ## Known issues
@@ -94,12 +127,14 @@ Les projets réels sont encore au format v1 : la migration est proposée à leur
 - Contexte limité au passage, à sa section et aux fiches nommées : pas de recherche dans tout le manuscrit.
 - Conversations précédentes conservées dans `_PARTNER.json` mais pas encore consultables dans l'interface.
 - Analyses heuristiques du parseur (type, description, forces…) toujours écrites comme champs, pas comme suggestions.
-- Pas de fusion d'alias assistée (seulement signalée) ; dialogue sans piège de focus complet (Tab).
+- Pas de fusion d'alias assistée (seulement signalée).
 - Parcours de migration/restauration non testés à la main dans l'UI.
-- Propriétés d'entités injectées sans échappement dans `innerHTML` (vues Bible ; script manga et « À traiter » corrigés).
 - CSP : `unsafe-inline` encore nécessaire (styles/handlers en ligne de l'ancien code).
 - Projets/config dépendent du dossier d'installation ; `assets/icon.png` absent (build).
-- `app.js` monolithique.
+- `app.js` encore gros (1 815 lignes) ; `manga-analysis.js` (heuristiques) non testé unitairement.
+- Barre d'outils d'Écrire sur deux lignes vers 1 400 px avec les deux panneaux ouverts (passage à la ligne voulu).
+- Scènes ancrées sur le titre de section : renommer le titre `##` dans le texte casse le lien (signalé à l'ouverture).
+- Pas d'annulation (Ctrl+Z) pour les modifications de Structure/Bible ; suppression = définitive (`.bak` = écriture précédente).
 
 ## Important decisions
 - Ordre de travail : celui du prompt (fiabilité → modèle → Écrire/partenaire → Structure/Bible/visuel).

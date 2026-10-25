@@ -18,8 +18,10 @@ Répondre et rédiger **en français** (l'utilisateur mélange FR/EN).
 
 ## Important paths
 - `App/main.js` — process Electron, IPC fichiers/settings (chemins relatifs à `Partner/`)
-- `App/src/components/app.js` — logique UI (~4000 lignes, un seul fichier) :
-  lire par plage/Grep sur le nom de méthode, jamais en entier
+- `App/src/components/app.js` — logique UI (~1800 lignes) : lire par plage/Grep sur le nom de méthode.
+  Vues : `structure-view.js`, `bible-view.js`, `partner-panel.js` ; mixins `story-bible-import.js`, `manga-analysis.js`
+- `App/src/core/` — modules sans DOM testés (`schema`, `project-model`, `structure`, `bible`, `partner-*`, `proposals`)
+- `App/src/styles/workspace.css` — charte (chargée en dernier) ; jetons de couleur en tête de `main.css`
 - `App/src/core/project-model.js` — fusion non destructive des extractions (testée, sans DOM)
 - `App/lib/safe-fs.js` — écriture atomique + `.bak`, périmètre des chemins IPC (Projets/, Inbox/)
 - `App/settings.json` — contient la clé API chiffrée (`apiKeyEnc`), non lisible par Claude,

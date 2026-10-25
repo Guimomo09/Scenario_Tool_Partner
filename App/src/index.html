@@ -3,224 +3,140 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'">
-  <title>Writing Partner</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self'">
+  <title>Partner</title>
+  <link rel="stylesheet" href="styles/fonts.css">
   <link rel="stylesheet" href="styles/main.css">
   <link rel="stylesheet" href="styles/editor.css">
   <link rel="stylesheet" href="styles/agents.css">
   <link rel="stylesheet" href="styles/partner.css">
+  <link rel="stylesheet" href="styles/workspace.css">
 </head>
-<body class="theme-dark">
-  
-  <!-- Barre de titre -->
-  <div class="titlebar">
+<body class="theme-light">
+
+  <!-- Bandeau : titre, position dans le projet -->
+  <header class="titlebar">
     <div class="titlebar-drag">
-      <span class="app-title">Writing Partner</span>
+      <span class="app-title">Partner</span>
       <span class="project-name" id="currentProjectName">Aucun projet</span>
       <span class="doc-position" id="docPosition" aria-live="off"></span>
     </div>
-  </div>
+  </header>
 
-  <!-- Container principal -->
   <div class="app-container">
-    
-    <!-- Sidebar gauche - Projet -->
-    <aside class="sidebar sidebar-left" id="sidebarLeft">
-      <!-- Sélecteur de projet -->
+
+    <!-- Navigation du projet -->
+    <aside class="sidebar sidebar-left" id="sidebarLeft" aria-label="Navigation du projet">
       <div class="project-selector">
+        <label class="visually-hidden" for="projectSelect">Projet</label>
         <select id="projectSelect">
-          <option value="">— Sélectionner un projet —</option>
+          <option value="">— Choisir un projet —</option>
         </select>
-        <button class="btn-icon" id="btnNewProject" title="Nouveau projet" aria-label="Nouveau projet">+</button>
+        <button class="btn-icon" id="btnNewProject" title="Nouveau projet (Ctrl+N)" aria-label="Nouveau projet"><span class="icon" data-icon="plus"></span></button>
       </div>
 
-      <!-- Documents du projet (fichiers .md du dossier) -->
-      <nav class="documents-nav hidden" id="documentsNav" aria-label="Documents du projet">
-        <div class="documents-header">Documents</div>
-        <ul class="documents-list" id="documentsList"></ul>
-      </nav>
-      
-      <!-- Onglets du projet (apparaît quand projet sélectionné) -->
-      <div class="project-tabs hidden" id="projectTabs">
-        <button class="project-tab active" data-tab="scenario" title="Scénario">
-          📜 <span>Scénario</span>
-        </button>
-        <button class="project-tab" data-tab="characters" title="Personnages">
-          👤 <span>Personnages</span>
-          <span class="tab-count" id="countCharacters">0</span>
-        </button>
-        <button class="project-tab" data-tab="places" title="Lieux">
-          🗺️ <span>Lieux</span>
-          <span class="tab-count" id="countPlaces">0</span>
-        </button>
-        <button class="project-tab" data-tab="systems" title="Systèmes">
-          ⚔️ <span>Systèmes</span>
-          <span class="tab-count" id="countSystems">0</span>
-        </button>
-        <button class="project-tab" data-tab="timeline" title="Timeline">
-          🕐 <span>Timeline</span>
-          <span class="tab-count" id="countTimeline">0</span>
-        </button>
-        <button class="project-tab" data-tab="refs" title="Références">
-          📚 <span>Références</span>
-          <span class="tab-count" id="countRefs">0</span>
-        </button>
-        <button class="project-tab" data-tab="todos" title="À faire">
-          🔴 <span>À traiter</span>
-          <span class="tab-count tab-count-warning" id="countTodos">0</span>
-        </button>
-      </div>
-      
-      <!-- Contenu des onglets -->
-      <div class="project-content" id="projectContent">
-        <!-- Panneau Scénario (structure) -->
-        <div class="project-panel active" id="panel-scenario">
-          <div class="panel-header">
-            <h3>Structure du Scénario</h3>
-          </div>
-          <div class="scenario-outline" id="scenarioOutline">
-            <p class="empty-state">Sélectionne un projet pour voir sa structure</p>
-          </div>
-        </div>
-        
-        <!-- Panneau Personnages -->
-        <div class="project-panel" id="panel-characters">
-          <div class="panel-header">
-            <h3>Personnages</h3>
-            <button class="btn-icon btn-add-item" data-type="character" disabled title="Ajout manuel pas encore disponible">+</button>
-          </div>
-          <div class="item-list" id="characterList">
-            <p class="empty-state">Aucun personnage</p>
-          </div>
-        </div>
-        
-        <!-- Panneau Lieux -->
-        <div class="project-panel" id="panel-places">
-          <div class="panel-header">
-            <h3>Lieux</h3>
-            <button class="btn-icon btn-add-item" data-type="place" disabled title="Ajout manuel pas encore disponible">+</button>
-          </div>
-          <div class="item-list" id="placesList">
-            <p class="empty-state">Aucun lieu</p>
-          </div>
-        </div>
-        
-        <!-- Panneau Systèmes -->
-        <div class="project-panel" id="panel-systems">
-          <div class="panel-header">
-            <h3>Systèmes</h3>
-            <button class="btn-icon btn-add-item" data-type="system" disabled title="Ajout manuel pas encore disponible">+</button>
-          </div>
-          <div class="item-list" id="systemsList">
-            <p class="empty-state">Aucun système</p>
-          </div>
-        </div>
-        
-        <!-- Panneau Timeline -->
-        <div class="project-panel" id="panel-timeline">
-          <div class="panel-header">
-            <h3>Timeline</h3>
-          </div>
-          <div class="timeline-list" id="timelineList">
-            <p class="empty-state">Aucun événement</p>
-          </div>
-        </div>
-        
-        <!-- Panneau Références -->
-        <div class="project-panel" id="panel-refs">
-          <div class="panel-header">
-            <h3>Références & Recherches</h3>
-            <button class="btn-icon" id="btnAddRef" disabled title="Ajout manuel pas encore disponible">+</button>
-          </div>
-          <div class="refs-list" id="refsList">
-            <p class="empty-state">Aucune référence</p>
-          </div>
-        </div>
-        
-        <!-- Panneau À traiter (zones d'ombre) -->
-        <div class="project-panel" id="panel-todos">
-          <div class="panel-header">
-            <h3>🔴 À Traiter</h3>
-          </div>
+      <div class="nav-scroll">
+        <nav class="nav-section documents-nav hidden" id="documentsNav" aria-labelledby="documentsHeading">
+          <h2 class="nav-heading" id="documentsHeading">Documents</h2>
+          <ul class="documents-list" id="documentsList"></ul>
+        </nav>
+
+        <nav class="nav-section hidden" id="scenesNav" aria-labelledby="scenesHeading">
+          <h2 class="nav-heading" id="scenesHeading">Scènes <span class="nav-count" id="scenesCount"></span></h2>
+          <ol class="scene-nav-list" id="sceneNavList"></ol>
+        </nav>
+
+        <details class="nav-section nav-todos hidden" id="todosNav">
+          <summary class="nav-heading">À traiter <span class="nav-count" id="countTodos">0</span></summary>
           <div class="todos-list" id="todosList">
             <p class="empty-state">Aucun point en suspens</p>
           </div>
-        </div>
+        </details>
       </div>
     </aside>
 
-    <!-- Zone principale - Double Éditeur -->
+    <!-- Zone de travail -->
     <main class="editor-area">
-      <!-- Barre d'outils -->
       <div class="editor-toolbar">
         <div class="toolbar-group">
-          <button class="toolbar-btn toolbar-toggle" id="btnToggleNav" aria-pressed="true" title="Afficher / masquer la navigation">Navigation</button>
-          <div class="toolbar-separator"></div>
-          <button class="toolbar-btn editor-mode-btn active" data-mode="notes" title="Le document seul, au centre">Écrire</button>
-          <button class="toolbar-btn editor-mode-btn" data-mode="split" title="Le document et l'aperçu structuré côte à côte">Écrire + aperçu</button>
-          <button class="toolbar-btn editor-mode-btn" data-mode="script" title="L'aperçu structuré seul (scénario, fiches)">Aperçu</button>
+          <button class="toolbar-btn toolbar-toggle btn-icon-only" id="btnToggleNav" aria-pressed="true" title="Afficher / masquer la navigation" aria-label="Navigation"><span class="icon" data-icon="panel-left"></span></button>
+          <div class="workspace-switch" role="tablist" aria-label="Espace de travail">
+            <button class="workspace-tab active" role="tab" aria-selected="true" data-workspace="write" title="Écrire (Ctrl+Maj+1)"><span class="icon" data-icon="pen"></span>Écrire</button>
+            <button class="workspace-tab" role="tab" aria-selected="false" data-workspace="structure" title="Structure (Ctrl+Maj+2)"><span class="icon" data-icon="scenes"></span>Structure</button>
+            <button class="workspace-tab" role="tab" aria-selected="false" data-workspace="bible" title="Bible (Ctrl+Maj+3)"><span class="icon" data-icon="book"></span>Bible</button>
+          </div>
         </div>
-        <div class="toolbar-separator"></div>
-        <div class="toolbar-group">
-          <button class="toolbar-btn" data-action="bold" title="Gras"><b>B</b></button>
-          <button class="toolbar-btn" data-action="italic" title="Italique"><i>I</i></button>
-          <button class="toolbar-btn" data-action="heading" title="Titre">H</button>
-          <button class="toolbar-btn" data-action="todo" title="Marquer à traiter">🔴</button>
+        <div class="toolbar-group write-only" aria-label="Affichage du document">
+          <button class="toolbar-btn editor-mode-btn active" data-mode="notes" title="Le document seul, au centre">Document</button>
+          <button class="toolbar-btn editor-mode-btn" data-mode="split" title="Le document et l'aperçu structuré côte à côte">Document + aperçu</button>
+          <button class="toolbar-btn editor-mode-btn" data-mode="script" title="L'aperçu structuré seul">Aperçu</button>
+        </div>
+        <div class="toolbar-group write-only" aria-label="Mise en forme">
+          <button class="toolbar-btn" data-action="bold" title="Gras" aria-label="Gras"><b>B</b></button>
+          <button class="toolbar-btn" data-action="italic" title="Italique" aria-label="Italique"><i>I</i></button>
+          <button class="toolbar-btn" data-action="heading" title="Titre de section" aria-label="Titre de section">H</button>
+          <button class="toolbar-btn" data-action="todo" title="Marquer à traiter" aria-label="Marquer à traiter"><span class="icon" data-icon="flag"></span></button>
         </div>
         <div class="toolbar-spacer"></div>
-        <div class="toolbar-group">
-          <button class="toolbar-btn" id="btnImport" title="Importer une Story Bible (.md)">📥 Import</button>
-          <button class="toolbar-btn" id="btnSync" title="Analyser les notes et compléter le projet (rien n’est supprimé)">🔄 Analyser</button>
+        <div class="toolbar-group write-only">
+          <button class="toolbar-btn" id="btnImport" title="Importer une Story Bible (.md) dans la Bible ; rien n'est supprimé"><span class="icon" data-icon="import"></span>Importer</button>
+          <button class="toolbar-btn" id="btnSync" title="Analyser _NOTES.md et proposer des compléments ; rien n'est supprimé"><span class="icon" data-icon="analyse"></span>Analyser les notes</button>
+          <span class="word-count" id="wordCount">0 mot</span>
         </div>
         <div class="toolbar-group">
-          <span class="word-count" id="wordCount">0 mots</span>
-        </div>
-        <div class="toolbar-group">
-          <button class="toolbar-btn toolbar-toggle" id="btnTogglePartner" aria-pressed="true" title="Afficher / masquer le partenaire (Ctrl+Maj+P)">Partenaire</button>
+          <button class="toolbar-btn btn-icon-only" id="btnFocus" aria-pressed="false" title="Mode focus (Ctrl+Maj+F, Échap pour sortir)" aria-label="Mode focus"><span class="icon" data-icon="focus"></span></button>
+          <button class="toolbar-btn toolbar-toggle btn-icon-only" id="btnTogglePartner" aria-pressed="true" title="Afficher / masquer le partenaire (Ctrl+Maj+P)" aria-label="Partenaire"><span class="icon" data-icon="panel-right"></span></button>
         </div>
       </div>
-      
-      <!-- Double éditeur -->
-      <div class="dual-editor mode-notes" id="dualEditor">
-        <!-- Éditeur Notes (gauche) -->
-        <div class="editor-pane" id="notesPane">
-          <div class="pane-header">
-            <span class="pane-title" id="docTitle">Document</span>
-            <span class="pane-hint" id="docHint">Sélectionne un passage pour demander l'aide du partenaire sur ce passage précis.</span>
+
+      <!-- Écrire -->
+      <div class="workspace-panel" id="workspaceWrite" role="tabpanel" aria-label="Écrire">
+        <div class="dual-editor mode-notes" id="dualEditor">
+          <div class="editor-pane" id="notesPane">
+            <div class="pane-header">
+              <span class="pane-title" id="docTitle">Document</span>
+              <span class="pane-hint" id="docHint">Sélectionnez un passage pour demander l'aide du partenaire sur ce passage précis.</span>
+              <button class="btn-link hidden" id="btnSceneHere" title="Créer une scène liée à la section où se trouve le curseur">Créer une scène ici</button>
+            </div>
+            <textarea class="editor" id="notesEditor" aria-labelledby="docTitle" spellcheck="true" placeholder="Écrivez ici.&#10;&#10;Les titres de section (## Titre) structurent le document et peuvent devenir des scènes."></textarea>
           </div>
-          <textarea class="editor" id="notesEditor" aria-labelledby="docTitle" spellcheck="true" placeholder="Note tes idées ici...&#10;&#10;Exemples:&#10;- p45 héros fait demi-tour et crie &quot;en garde!&quot;&#10;- personnage: Marie a peur du noir&#10;- lieu: la grotte est humide et sombre&#10;- TODO: définir le motif du méchant"></textarea>
-        </div>
-        
-        <!-- Séparateur redimensionnable -->
-        <div class="editor-resizer" id="editorResizer"></div>
-        
-        <!-- Éditeur Scénario (droite) -->
-        <div class="editor-pane" id="scriptPane">
-          <div class="pane-header">
-            <span class="pane-title">📜 Scénario</span>
-            <span class="pane-hint">Vue d'ensemble • <span class="todo-indicator">🔴 zones à traiter en rouge</span></span>
-          </div>
-          <div class="script-view" id="scriptView">
-            <div class="script-content" id="scriptContent">
-              <p class="empty-state">Le scénario apparaîtra ici après synchronisation</p>
+
+          <div class="editor-resizer" id="editorResizer" aria-hidden="true"></div>
+
+          <div class="editor-pane" id="scriptPane">
+            <div class="pane-header">
+              <span class="pane-title">Aperçu structuré</span>
+              <span class="pane-hint">Lecture seule, construit par « Analyser les notes »</span>
+            </div>
+            <div class="script-view" id="scriptView">
+              <div class="script-content" id="scriptContent">
+                <p class="empty-state">L'aperçu apparaîtra ici après l'analyse des notes.</p>
+              </div>
             </div>
           </div>
         </div>
       </div>
-      
+
+      <!-- Structure -->
+      <section class="workspace-panel workspace-view hidden" id="workspaceStructure" role="tabpanel" aria-label="Structure"></section>
+
+      <!-- Bible -->
+      <section class="workspace-panel workspace-view hidden" id="workspaceBible" role="tabpanel" aria-label="Bible"></section>
+
       <div class="editor-statusbar">
         <span id="saveStatus" role="status" aria-live="polite">Enregistré</span>
         <span id="syncStatus">Non analysé</span>
+        <button class="btn-link focus-exit" id="btnExitFocus">Quitter le mode focus (Échap)</button>
       </div>
     </main>
 
     <!-- Partenaire d'écriture -->
     <aside class="sidebar sidebar-right" id="sidebarRight" aria-label="Partenaire d'écriture">
       <div class="partner-header">
-        <h3>Partenaire</h3>
+        <h2 class="partner-title">Partenaire</h2>
         <div class="partner-header-actions">
           <button class="btn-link" id="btnNewConversation" title="Commencer une nouvelle conversation (l'actuelle est conservée)">Nouvelle conversation</button>
-          <button class="btn-icon" id="btnSettings" title="Paramètres" aria-label="Paramètres">⚙</button>
+          <button class="btn-icon" id="btnSettings" title="Paramètres" aria-label="Paramètres"><span class="icon" data-icon="settings"></span></button>
         </div>
       </div>
       <div class="partner-status" id="partnerStatus" role="status" aria-live="polite"></div>
@@ -269,12 +185,12 @@
     </aside>
   </div>
 
-  <!-- Modal Aide -->
+  <!-- Aide -->
   <div class="modal hidden" id="modalHelp">
-    <div class="modal-content modal-large">
+    <div class="modal-content modal-large" role="dialog" aria-modal="true" aria-labelledby="helpTitle">
       <div class="modal-header">
-        <h3>Raccourcis clavier</h3>
-        <button class="btn-close" id="btnCloseHelp" aria-label="Fermer l'aide">×</button>
+        <h3 id="helpTitle">Raccourcis clavier</h3>
+        <button class="btn-close" id="btnCloseHelp" aria-label="Fermer l'aide"><span class="icon" data-icon="close"></span></button>
       </div>
       <div class="modal-body">
         <div class="shortcuts-grid">
@@ -284,13 +200,14 @@
             <div class="shortcut"><kbd>Ctrl+S</kbd> Enregistrer maintenant</div>
           </div>
           <div class="shortcut-category">
-            <h4>Édition</h4>
-            <div class="shortcut"><kbd>Ctrl+Z</kbd> Annuler</div>
-            <div class="shortcut"><kbd>Ctrl+Y</kbd> Rétablir</div>
+            <h4>Espaces</h4>
+            <div class="shortcut"><kbd>Ctrl+Maj+1</kbd> Écrire</div>
+            <div class="shortcut"><kbd>Ctrl+Maj+2</kbd> Structure</div>
+            <div class="shortcut"><kbd>Ctrl+Maj+3</kbd> Bible</div>
           </div>
           <div class="shortcut-category">
             <h4>Partenaire</h4>
-            <div class="shortcut"><kbd>Ctrl+Shift+P</kbd> Afficher / masquer</div>
+            <div class="shortcut"><kbd>Ctrl+Maj+P</kbd> Afficher / masquer</div>
             <div class="shortcut"><kbd>Ctrl+1</kbd> Explorer</div>
             <div class="shortcut"><kbd>Ctrl+2</kbd> Structurer</div>
             <div class="shortcut"><kbd>Ctrl+3</kbd> Écrire</div>
@@ -299,8 +216,9 @@
           </div>
           <div class="shortcut-category">
             <h4>Affichage</h4>
-            <div class="shortcut"><kbd>Ctrl+Shift+F</kbd> Mode focus</div>
-            <div class="shortcut"><kbd>Ctrl+Shift+T</kbd> Thème</div>
+            <div class="shortcut"><kbd>Ctrl+Maj+F</kbd> Mode focus</div>
+            <div class="shortcut"><kbd>Échap</kbd> Quitter le mode focus</div>
+            <div class="shortcut"><kbd>Ctrl+Maj+T</kbd> Thème</div>
             <div class="shortcut"><kbd>Ctrl+/</kbd> Cette aide</div>
           </div>
         </div>
@@ -308,13 +226,20 @@
     </div>
   </div>
 
+  <script src="components/icons.js"></script>
   <script src="core/schema.js"></script>
   <script src="core/manga-parser.js"></script>
   <script src="core/project-model.js"></script>
+  <script src="core/structure.js"></script>
+  <script src="core/bible.js"></script>
   <script src="core/partner-context.js"></script>
   <script src="core/proposals.js"></script>
   <script src="core/partner-store.js"></script>
   <script src="components/partner-panel.js"></script>
+  <script src="components/structure-view.js"></script>
+  <script src="components/bible-view.js"></script>
+  <script src="components/story-bible-import.js"></script>
+  <script src="components/manga-analysis.js"></script>
   <script src="components/app.js"></script>
 </body>
 </html>

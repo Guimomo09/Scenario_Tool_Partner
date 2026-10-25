@@ -36,7 +36,7 @@ function createWindow() {
     },
     titleBarStyle: 'hiddenInset',
     frame: process.platform === 'darwin' ? true : true,
-    backgroundColor: '#1a1a2e'
+    backgroundColor: '#F4F0E8'
   });
 
   // Désactiver le cache de session
@@ -99,6 +99,10 @@ function getMenuTemplate() {
             mainWindow.webContents.reloadIgnoringCache();
           });
         }},
+        { type: 'separator' },
+        { label: 'Écrire', accelerator: 'CmdOrCtrl+Shift+1', click: () => mainWindow.webContents.send('workspace', 'write') },
+        { label: 'Structure', accelerator: 'CmdOrCtrl+Shift+2', click: () => mainWindow.webContents.send('workspace', 'structure') },
+        { label: 'Bible', accelerator: 'CmdOrCtrl+Shift+3', click: () => mainWindow.webContents.send('workspace', 'bible') },
         { type: 'separator' },
         { label: 'Mode Focus', accelerator: 'CmdOrCtrl+Shift+F', click: () => mainWindow.webContents.send('toggle-focus') },
         { label: 'Thème Sombre/Clair', accelerator: 'CmdOrCtrl+Shift+T', click: () => mainWindow.webContents.send('toggle-theme') },
@@ -304,7 +308,7 @@ function readSettingsFile() {
   } catch (e) {
     console.error('settings.json illisible :', e.message);
   }
-  return { theme: 'dark', apiProvider: 'none' };
+  return { theme: 'light', apiProvider: 'none' };
 }
 
 function writeSettingsFile(stored) {

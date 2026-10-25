@@ -51,7 +51,7 @@ function publicSettings(stored) {
     };
   });
   return {
-    theme: stored.theme === 'light' ? 'light' : 'dark',
+    theme: stored.theme === 'dark' ? 'dark' : 'light',
     apiProvider: provider,
     providers,
     hasApiKey: provider !== 'none' && Boolean(providers[provider]?.hasApiKey),

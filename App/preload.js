@@ -38,6 +38,7 @@ contextBridge.exposeInMainWorld('api', {
   onTogglePartner: (callback) => ipcRenderer.on('toggle-partner', callback),
   onPartnerIntent: (callback) => ipcRenderer.on('partner-intent', (event, intent) => callback(intent)),
   onShowShortcuts: (callback) => ipcRenderer.on('show-shortcuts', callback),
+  onWorkspace: (callback) => ipcRenderer.on('workspace', (event, name) => callback(name)),
 
   // Platform info
   platform: process.platform

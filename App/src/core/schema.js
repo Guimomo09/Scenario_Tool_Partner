@@ -17,7 +17,9 @@
   // Collections dont chaque élément reçoit un identifiant stable
   const ID_PREFIXES = {
     script: 'pg', sequences: 'sq', characters: 'ch', places: 'pl', systems: 'sy',
-    timeline: 'tl', refs: 'rf', todos: 'td', arcs: 'ar'
+    timeline: 'tl', refs: 'rf', todos: 'td', arcs: 'ar',
+    // Scènes (Structure) : ajoutées en v2 sans changement de version, une liste absente vaut vide
+    scenes: 'sc'
   };
   const COLLECTIONS = Object.keys(ID_PREFIXES);
 

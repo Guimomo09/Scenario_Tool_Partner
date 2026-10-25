@@ -234,7 +234,8 @@ class PartnerPanel {
       cursor: editor.selectionStart,
       projectData: this.app.projectData,
       canon: entry?.store.canon || [],
-      excluded: [...this.excluded]
+      excluded: [...this.excluded],
+      scene: this.app.activeSceneContext()
     });
     return { items, selection };
   }

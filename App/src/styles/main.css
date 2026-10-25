@@ -1,56 +1,82 @@
 /* === Variables & Reset === */
+/* Atelier éditorial : papier, encre, brique. Contrastes vérifiés (texte ≥ 4,5:1, traits de champ ≥ 3:1). */
 :root {
-  /* Dark theme */
-  --bg-primary: #1a1a2e;
-  --bg-secondary: #16213e;
-  --bg-tertiary: #0f3460;
-  --bg-hover: #1f4068;
-  
-  --text-primary: #eaeaea;
-  --text-secondary: #a0a0a0;
-  --text-muted: #6a6a8a;
-  
-  --accent: #e94560;
-  --accent-hover: #ff6b6b;
-  --accent-soft: rgba(233, 69, 96, 0.2);
-  
-  --border: #2a2a4a;
-  --shadow: rgba(0, 0, 0, 0.3);
-  
-  --success: #4ade80;
-  --warning: #fbbf24;
-  --error: #ef4444;
-  
-  --sidebar-width: 280px;
-  --agent-panel-width: 350px;
-  --titlebar-height: 40px;
-  --toolbar-height: 44px;
-  --statusbar-height: 28px;
-  
-  --font-main: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --font-editor: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
-  --font-writing: 'Georgia', 'Crimson Text', serif;
-  
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  
-  --transition: 0.2s ease;
+  /* Thème clair (principal) */
+  --paper: #F4F0E8;
+  --surface: #FCFAF6;
+  --ink: #25241F;
+  --ink-soft: #686359;
+  --rule: #D8D1C5;
+  --line-strong: #8C8475;
+  --brick: #9D4938;
+  --brick-strong: #87392A;
+  --brick-wash: rgba(157, 73, 56, 0.10);
+  --olive: #5C6750;
+  --on-accent: #FFFFFF;
 }
 
-/* Light theme */
-.theme-light {
-  --bg-primary: #f5f5f7;
-  --bg-secondary: #ffffff;
-  --bg-tertiary: #e8e8ed;
-  --bg-hover: #d8d8dd;
-  
-  --text-primary: #1d1d1f;
-  --text-secondary: #6e6e73;
-  --text-muted: #98989d;
-  
-  --border: #d2d2d7;
-  --shadow: rgba(0, 0, 0, 0.1);
+/* Alias calculés aussi sur body : ils suivent ainsi les jetons redéfinis par .theme-dark */
+:root, body {
+  --bg-primary: var(--paper);
+  --bg-secondary: var(--surface);
+  --bg-tertiary: #ECE6DB;
+  --bg-hover: #E8E1D5;
+
+  --text-primary: var(--ink);
+  --text-secondary: var(--ink-soft);
+  --text-muted: #6B655B;
+
+  --accent: var(--brick);
+  --accent-hover: var(--brick-strong);
+  --accent-soft: var(--brick-wash);
+
+  --border: var(--rule);
+  --shadow: rgba(37, 36, 31, 0.10);
+
+  --success: var(--olive);
+  --warning: #7E6019;
+  --error: #A5302A;
+}
+
+:root {
+  --sidebar-width: 236px;
+  --agent-panel-width: 360px;
+  --titlebar-height: 38px;
+  --toolbar-height: 44px;
+  --statusbar-height: 28px;
+
+  --font-main: 'Source Sans 3', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-writing: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+  --font-editor: var(--font-writing);
+  --font-mono: 'Cascadia Mono', Consolas, monospace;
+
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+
+  --transition: 0.15s ease;
+}
+
+/* Thème sombre : charbon chaud et papier atténué, même hiérarchie */
+body.theme-dark {
+  --paper: #1E1C19;
+  --surface: #262420;
+  --ink: #E9E3D7;
+  --ink-soft: #A79F91;
+  --rule: #3A3631;
+  --line-strong: #7A7368;
+  --brick: #D9826D;
+  --brick-strong: #E89A86;
+  --brick-wash: rgba(217, 130, 109, 0.14);
+  --olive: #9AA889;
+  --on-accent: #1E1C19;
+
+  --bg-tertiary: #2E2B27;
+  --bg-hover: #35312C;
+  --text-muted: #978F82;
+  --shadow: rgba(0, 0, 0, 0.35);
+  --warning: #D4A84F;
+  --error: #E07A6A;
 }
 
 * {

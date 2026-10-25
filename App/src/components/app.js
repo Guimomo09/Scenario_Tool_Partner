@@ -33,7 +33,11 @@ class WritingPartnerApp {
     this.currentDoc = null;
     this.documents = [];
     this.docVersion = 0;
-    this.currentMainView = 'scenario'; // scenario, characters, places, etc.
+    // Espace de travail affiché : write (Écrire), structure, bible
+    this.workspace = 'write';
+    // Écriture différée de _PROJECT.json, liée au projet modifié
+    this.pendingProject = null;
+    this.projectSaveTimer = null;
     
     // Init
     this.init();
@@ -42,7 +46,8 @@ class WritingPartnerApp {
   async init() {
     // Load settings
     this.settings = await window.api.getSettings();
-    this.applyTheme(this.settings.theme || 'dark');
+    this.applyTheme(this.settings.theme || 'light');
+    window.Icons.hydrate();
     
     // Setup all events
     this.setupProjectEvents();
@@ -51,6 +56,9 @@ class WritingPartnerApp {
     this.setupMenuEvents();
     this.setupPanels();
     this.partner = new window.PartnerPanel(this);
+    this.structure = new window.StructureView(this);
+    this.bible = new window.BibleView(this);
+    this.setupWorkspaces();
 
     // Load projects into selector
     await this.loadProjectList();
@@ -115,21 +123,172 @@ class WritingPartnerApp {
     });
   }
 
+  // === Espaces de travail : Écrire, Structure, Bible ===
+  setupWorkspaces() {
+    document.querySelectorAll('.workspace-tab').forEach(tab => {
+      tab.addEventListener('click', () => this.setWorkspace(tab.dataset.workspace));
+    });
+    document.getElementById('btnFocus').addEventListener('click', () => this.toggleFocus());
+    document.getElementById('btnExitFocus').addEventListener('click', () => this.toggleFocus(false));
+    document.getElementById('btnSceneHere').addEventListener('click', () => this.createSceneHere());
+    let saved = 'write';
+    try { saved = localStorage.getItem('workspace') || 'write'; } catch (e) {}
+    this.setWorkspace(['write', 'structure', 'bible'].includes(saved) ? saved : 'write', { focus: false });
+  }
+
+  setWorkspace(name, { focus = true } = {}) {
+    if (!['write', 'structure', 'bible'].includes(name)) return;
+    this.workspace = name;
+    const panels = { write: 'workspaceWrite', structure: 'workspaceStructure', bible: 'workspaceBible' };
+    Object.entries(panels).forEach(([key, id]) => document.getElementById(id).classList.toggle('hidden', key !== name));
+    document.querySelectorAll('.workspace-tab').forEach(tab => {
+      const active = tab.dataset.workspace === name;
+      tab.classList.toggle('active', active);
+      tab.setAttribute('aria-selected', String(active));
+      tab.tabIndex = active ? 0 : -1;
+    });
+    document.body.dataset.workspace = name;
+    if (name !== 'write' && document.body.classList.contains('focus-mode')) this.toggleFocus(false);
+    try { localStorage.setItem('workspace', name); } catch (e) {}
+    if (name === 'structure') this.structure.render();
+    if (name === 'bible') this.bible.render();
+    this.updatePosition();
+    this.partner?.refreshContext();
+    if (focus && name === 'write' && this.currentDoc) this.editor.focus();
+  }
+
+  // Mode focus : le document seul ; Échap, le bouton du bas ou Ctrl+Maj+F pour sortir.
+  // Ctrl+S et Ctrl+Maj+P restent disponibles (le partenaire s'ouvre par-dessus).
+  toggleFocus(force) {
+    const body = document.body.classList;
+    const on = typeof force === 'boolean' ? force : !body.contains('focus-mode');
+    if (on === body.contains('focus-mode')) return;
+    if (on) {
+      if (this.workspace !== 'write') this.setWorkspace('write');
+      // Panneaux masqués à l'entrée, rétablis à la sortie
+      this.panelsBeforeFocus = { nav: !body.contains('nav-hidden'), partner: !body.contains('partner-hidden') };
+      body.add('partner-hidden');
+      document.getElementById('btnTogglePartner').setAttribute('aria-pressed', 'false');
+    } else if (this.panelsBeforeFocus) {
+      this.setPanelVisible('partner', this.panelsBeforeFocus.partner);
+      this.setPanelVisible('nav', this.panelsBeforeFocus.nav);
+      this.panelsBeforeFocus = null;
+    }
+    body.toggle('focus-mode', on);
+    document.getElementById('btnFocus').setAttribute('aria-pressed', String(on));
+    if (on && this.editorMode !== 'notes') this.setEditorMode('notes');
+    if (on) this.editor.focus();
+  }
+
+  // Tout ce qui dépend des données du projet
+  refreshViews() {
+    this.populateTodos();
+    this.renderScript();
+    this.structure.render();
+    this.bible.render();
+    this.updatePosition();
+  }
+
+  // Scène liée à la section du curseur (Écrire) ou scène choisie (Structure)
+  activeScene() {
+    if (!this.currentProject) return null;
+    if (this.workspace === 'structure') return this.structure.selected;
+    if (!this.currentDoc) return null;
+    const section = window.PartnerContext.findSection(this.editor.value, this.editor.selectionStart);
+    return section.index >= 0 ? window.Structure.sceneAt(this.projectData, this.currentDoc.name, section.title) : null;
+  }
+
+  activeSceneId() {
+    return this.activeScene()?.id || null;
+  }
+
+  // Fiche de la scène active pour le contexte du partenaire
+  activeSceneContext() {
+    const scene = this.activeScene();
+    if (!scene) return null;
+    return {
+      ...scene,
+      statusLabel: window.Structure.statusLabel(scene.status),
+      characterNames: window.Structure.charactersOf(this.projectData, scene).filter(c => !c.missing).map(c => c.name)
+    };
+  }
+
+  // Depuis la navigation : écrire la scène si elle est liée à un document, sinon l'ouvrir en Structure
+  goToScene(id, { workspace = null } = {}) {
+    const scene = (this.projectData.scenes || []).find(s => s.id === id);
+    if (!scene) return;
+    const linked = scene.doc && this.documents.some(d => d.name === scene.doc);
+    if ((workspace || this.workspace) === 'write' && linked) {
+      this.openScene(scene);
+      return;
+    }
+    this.setWorkspace('structure');
+    this.structure.select(id);
+  }
+
+  // Ouvre le document de la scène et place le curseur sous son titre de section
+  async openScene(scene) {
+    if (!scene?.doc) return;
+    this.setWorkspace('write', { focus: false });
+    if (this.currentDoc?.name !== scene.doc && !(await this.openDocument(scene.doc))) return;
+    const editor = this.editor;
+    const sections = window.PartnerContext.listSections(editor.value);
+    const norm = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const target = sections.find(s => norm(s.title) === norm(scene.heading));
+    if (!target) {
+      if (scene.heading) this.addChatMessage(`Section « ${scene.heading} » introuvable dans « ${scene.doc} » : le document est ouvert au début.`, 'info');
+      editor.focus();
+      return;
+    }
+    const lineEnd = editor.value.indexOf('\n', target.start);
+    const pos = lineEnd < 0 ? editor.value.length : lineEnd + 1;
+    editor.focus();
+    editor.setSelectionRange(pos, pos);
+    // Faire défiler jusqu'à la section (proportion de lignes, sans dépendre de la mise en page exacte)
+    const line = editor.value.slice(0, pos).split('\n').length;
+    const total = editor.value.split('\n').length;
+    editor.scrollTop = Math.max(0, (line / total) * editor.scrollHeight - editor.clientHeight / 3);
+    this.updatePosition();
+    this.partner.refreshContext();
+  }
+
+  // Crée une scène liée à la section où se trouve le curseur
+  async createSceneHere() {
+    if (!this.currentDoc) return;
+    const section = window.PartnerContext.findSection(this.editor.value, this.editor.selectionStart);
+    if (section.index < 0) return;
+    const doc = this.currentDoc.name;
+    let created = null;
+    const ok = await this.mutateProject(d => {
+      const r = window.Structure.addScene(d, { title: section.title, doc, heading: section.title, status: 'draft' });
+      created = r.scene;
+      return r.data;
+    });
+    if (ok) {
+      this.structure.render();
+      this.addChatMessage(`Scène « ${created.title} » créée et liée à cette section. Décrivez-la dans Structure.`, 'info');
+    }
+  }
+
   // === Menu, raccourcis et fermeture ===
   setupMenuEvents() {
     window.api.onMenuNew(() => this.createNewProject());
     window.api.onMenuSave(() => this.saveAll());
     window.api.onMenuRestoreBackup(() => this.restoreProjectBackup());
     window.api.onToggleTheme(() => this.toggleTheme());
-    window.api.onToggleFocus(() => document.body.classList.toggle('focus-mode'));
+    window.api.onToggleFocus(() => this.toggleFocus());
+    window.api.onWorkspace((name) => this.setWorkspace(name));
     window.api.onTogglePartner(() => this.setPanelVisible('partner', document.body.classList.contains('partner-hidden')));
     window.api.onPartnerIntent((intent) => this.partner.focus(intent));
     window.api.onShowShortcuts(() => this.toggleHelp(true));
 
     document.getElementById('btnCloseHelp').addEventListener('click', () => this.toggleHelp(false));
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && !document.getElementById('modalHelp').classList.contains('hidden')) {
+      if (e.key !== 'Escape') return;
+      if (!document.getElementById('modalHelp').classList.contains('hidden')) {
         this.toggleHelp(false);
+      } else if (document.body.classList.contains('focus-mode') && !document.querySelector('.confirm-dialog-overlay, .dialog-overlay')) {
+        this.toggleFocus(false);
       }
     });
 
@@ -165,9 +324,8 @@ class WritingPartnerApp {
   // Enregistre tout ce qui est en attente ; renvoie false si une écriture a échoué
   async saveAll() {
     if (this.currentDoc) this.partner.rememberDocument(this.currentDoc.name, this.editor.selectionStart);
-    const [notesOk, partnerOk] = await Promise.all([this.flushNotes(), this.partner.flush()]);
-    // Projet illisible : rien n'a pu y être modifié (synchro et import bloqués), rien à écrire
-    const projectOk = this.currentProject && !this.projectLoadError ? await this.saveProject() : true;
+    // Le projet n'est écrit que s'il a été modifié (jamais s'il est illisible ou à migrer)
+    const [notesOk, partnerOk, projectOk] = await Promise.all([this.flushNotes(), this.partner.flush(), this.flushProject()]);
     return notesOk && partnerOk && projectOk;
   }
   
@@ -197,8 +355,8 @@ class WritingPartnerApp {
 
       // Enregistrer le projet quitté avant de changer
       if (this.currentDoc) this.partner.rememberDocument(this.currentDoc.name, this.editor.selectionStart);
-      const [ok] = await Promise.all([this.flushNotes(), this.partner.flush()]);
-      if (!ok && !confirm('Les notes du projet actuel n\'ont pas pu être enregistrées. Changer de projet quand même ?')) {
+      const [notesOk, , projectOk] = await Promise.all([this.flushNotes(), this.partner.flush(), this.flushProject()]);
+      if (!(notesOk && projectOk) && !confirm('Le projet actuel n\'a pas pu être entièrement enregistré. Changer de projet quand même ?')) {
         select.value = this.currentProject?.path || '';
         return;
       }
@@ -213,327 +371,6 @@ class WritingPartnerApp {
     // New project button
     document.getElementById('btnNewProject').addEventListener('click', () => this.createNewProject());
     
-    // Project tabs - Affichent maintenant dans la zone principale
-    document.querySelectorAll('.project-tab').forEach(tab => {
-      tab.addEventListener('click', () => {
-        document.querySelectorAll('.project-tab').forEach(t => t.classList.remove('active'));
-        tab.classList.add('active');
-        
-        // Afficher le contenu dans la zone principale (scriptContent)
-        this.showMainView(tab.dataset.tab);
-      });
-    });
-  }
-  
-  // Affiche le contenu d'un tab dans la zone principale
-  showMainView(viewType) {
-    const container = document.getElementById('scriptContent');
-    const paneTitle = document.querySelector('#scriptPane .pane-title');
-    this.currentMainView = viewType;
-    if (this.editorMode === 'notes') this.setEditorMode('split');
-    
-    // Mettre à jour le titre du panneau
-    const titles = {
-      'scenario': '📜 Scénario',
-      'characters': '👥 Personnages',
-      'places': '🗺️ Lieux',
-      'systems': '⚔️ Systèmes',
-      'timeline': '🕐 Timeline',
-      'refs': '📚 Références',
-      'todos': '🔴 À Traiter'
-    };
-    paneTitle.textContent = titles[viewType] || '📜 Scénario';
-    
-    // Afficher/masquer le bouton retour
-    this.updateBackButton(viewType !== 'scenario');
-    
-    switch (viewType) {
-      case 'scenario':
-        this.renderScript();
-        break;
-      case 'characters':
-        this.renderCharactersMain();
-        break;
-      case 'places':
-        this.renderPlacesMain();
-        break;
-      case 'systems':
-        this.renderSystemsMain();
-        break;
-      case 'timeline':
-        this.renderTimelineMain();
-        break;
-      case 'refs':
-        this.renderRefsMain();
-        break;
-      case 'todos':
-        this.renderTodosMain();
-        break;
-      default:
-        this.renderScript();
-    }
-  }
-  
-  updateBackButton(show) {
-    let backBtn = document.getElementById('btnBackToScript');
-    if (show && !backBtn) {
-      // Créer le bouton s'il n'existe pas
-      backBtn = document.createElement('button');
-      backBtn.id = 'btnBackToScript';
-      backBtn.className = 'btn-back-script';
-      backBtn.innerHTML = '← Scénario';
-      backBtn.title = 'Retourner au scénario complet';
-      backBtn.onclick = () => {
-        document.querySelectorAll('.project-tab').forEach(t => t.classList.remove('active'));
-        document.querySelector('[data-tab="scenario"]').classList.add('active');
-        this.showMainView('scenario');
-      };
-      document.querySelector('#scriptPane .pane-header').appendChild(backBtn);
-    } else if (backBtn) {
-      backBtn.style.display = show ? 'inline-flex' : 'none';
-    }
-  }
-  
-  // === Rendus des vues principales ===
-  
-  renderCharactersMain() {
-    const container = document.getElementById('scriptContent');
-    const characters = this.projectData.characters || [];
-    
-    if (characters.length === 0) {
-      container.innerHTML = `
-        <div class="main-view-empty">
-          <h2>👥 Aucun personnage</h2>
-          <p>Synchronise tes notes ou importe une Story Bible pour ajouter des personnages.</p>
-        </div>
-      `;
-      return;
-    }
-    
-    container.innerHTML = `
-      <div class="main-view-content">
-        <div class="view-header">
-          <h2>👥 Personnages</h2>
-          <span class="view-count">${characters.length} personnage(s)</span>
-        </div>
-        <div class="cards-grid characters-main-grid">
-          ${characters.map((c, i) => `
-            <div class="main-card character-main-card" data-index="${i}">
-              <div class="main-card-header">
-                <h3>${c.name || '[Sans nom]'}</h3>
-                ${c.role ? `<span class="card-tag role-tag">${c.role}</span>`
-                  : c.suggestedRole ? `<span class="card-tag role-tag suggestion-tag" title="Rôle suggéré, à confirmer">${this.escapeHtml(c.suggestedRole)} ?</span>` : ''}
-              </div>
-              <div class="main-card-body">
-                ${c.description ? `<p class="card-description">${c.description}</p>` : ''}
-                ${c.objective ? `<div class="card-attr"><span class="attr-label">🎯 Objectif:</span> ${c.objective}</div>` : ''}
-                ${c.conflict ? `<div class="card-attr"><span class="attr-label">⚡ Conflit:</span> ${c.conflict}</div>` : ''}
-                ${c.motivation ? `<div class="card-attr"><span class="attr-label">💡 Motivation:</span> ${c.motivation}</div>` : ''}
-                ${c.traits?.length ? `
-                  <div class="card-traits">
-                    ${c.traits.map(t => `<span class="trait-chip">${t}</span>`).join('')}
-                  </div>
-                ` : ''}
-              </div>
-            </div>
-          `).join('')}
-        </div>
-      </div>
-    `;
-  }
-  
-  renderPlacesMain() {
-    const container = document.getElementById('scriptContent');
-    const places = this.projectData.places || [];
-    
-    if (places.length === 0) {
-      container.innerHTML = `
-        <div class="main-view-empty">
-          <h2>🗺️ Aucun lieu</h2>
-          <p>Synchronise tes notes pour ajouter des lieux.</p>
-        </div>
-      `;
-      return;
-    }
-    
-    container.innerHTML = `
-      <div class="main-view-content">
-        <div class="view-header">
-          <h2>🗺️ Lieux</h2>
-          <span class="view-count">${places.length} lieu(x)</span>
-        </div>
-        <div class="cards-grid places-main-grid">
-          ${places.map((p, i) => `
-            <div class="main-card place-main-card" data-index="${i}">
-              <h3>${p.name}</h3>
-              <p>${p.description || ''}</p>
-              ${p.atmosphere ? `<span class="card-tag atmosphere-tag">${p.atmosphere}</span>` : ''}
-            </div>
-          `).join('')}
-        </div>
-      </div>
-    `;
-  }
-  
-  renderSystemsMain() {
-    const container = document.getElementById('scriptContent');
-    const systems = this.projectData.systems || [];
-    
-    if (systems.length === 0) {
-      container.innerHTML = `
-        <div class="main-view-empty">
-          <h2>⚔️ Aucun système</h2>
-          <p>Systèmes de magie, technologie, règles de l'univers...</p>
-        </div>
-      `;
-      return;
-    }
-    
-    container.innerHTML = `
-      <div class="main-view-content">
-        <div class="view-header">
-          <h2>⚔️ Systèmes & Règles</h2>
-          <span class="view-count">${systems.length}</span>
-        </div>
-        <div class="systems-main-list">
-          ${systems.map((s, i) => `
-            <div class="main-card system-main-card" data-index="${i}">
-              <div class="main-card-header">
-                <h3>${s.name}</h3>
-                ${s.type ? `<span class="card-tag type-tag">${s.type}</span>` : ''}
-              </div>
-              <p>${s.description || ''}</p>
-            </div>
-          `).join('')}
-        </div>
-      </div>
-    `;
-  }
-  
-  renderTimelineMain() {
-    const container = document.getElementById('scriptContent');
-    
-    // Filtrer les événements invalides
-    const invalidPatterns = [
-      /^présentateur$/i,
-      /^technicien$/i,
-      /^majordome$/i,
-      /^[a-z]+\s*$/i  // Mots simples sans contexte
-    ];
-    
-    const timeline = (this.projectData.timeline || []).filter(t => {
-      return !invalidPatterns.some(pattern => 
-        pattern.test(t.period) || pattern.test(t.event)
-      );
-    });
-    
-    if (timeline.length === 0) {
-      container.innerHTML = `
-        <div class="main-view-empty">
-          <h2>🕐 Timeline vide</h2>
-          <p>Ajoute des événements chronologiques dans tes notes.</p>
-          <p class="hint">Exemple: "Il y a 50 ans: Fondation de l'abri"</p>
-        </div>
-      `;
-      return;
-    }
-    
-    container.innerHTML = `
-      <div class="main-view-content">
-        <div class="view-header">
-          <h2>🕐 Timeline</h2>
-          <span class="view-count">${timeline.length} événement(s)</span>
-        </div>
-        <div class="timeline-main-view">
-          ${timeline.map((e, i) => `
-            <div class="timeline-main-item" data-index="${i}">
-              <div class="timeline-main-marker">
-                <div class="marker-dot"></div>
-                <div class="marker-line"></div>
-              </div>
-              <div class="timeline-main-content">
-                <div class="timeline-period">${e.period}</div>
-                <div class="timeline-event">${e.event}</div>
-              </div>
-            </div>
-          `).join('')}
-        </div>
-      </div>
-    `;
-  }
-  
-  renderRefsMain() {
-    const container = document.getElementById('scriptContent');
-    const refs = this.projectData.refs || [];
-    
-    if (refs.length === 0) {
-      container.innerHTML = `
-        <div class="main-view-empty">
-          <h2>📚 Aucune référence</h2>
-          <p>Utilise le Veilleur pour rechercher et sauvegarder des références.</p>
-        </div>
-      `;
-      return;
-    }
-    
-    container.innerHTML = `
-      <div class="main-view-content">
-        <div class="view-header">
-          <h2>📚 Références</h2>
-          <span class="view-count">${refs.length}</span>
-        </div>
-        <div class="refs-main-list">
-          ${refs.map((r, i) => `
-            <div class="main-card ref-main-card" data-index="${i}">
-              <h3>${r.title}</h3>
-              ${r.source ? `<a class="ref-source" href="${r.source}" target="_blank">${r.source}</a>` : ''}
-              <p>${r.content || ''}</p>
-            </div>
-          `).join('')}
-        </div>
-      </div>
-    `;
-  }
-  
-  renderTodosMain() {
-    const container = document.getElementById('scriptContent');
-    const todos = this.projectData.todos || [];
-    
-    if (todos.length === 0) {
-      container.innerHTML = `
-        <div class="main-view-empty success">
-          <h2>🎉 Aucun point à traiter</h2>
-          <p>Tous les éléments sont définis !</p>
-        </div>
-      `;
-      return;
-    }
-    
-    container.innerHTML = `
-      <div class="main-view-content">
-        <div class="view-header">
-          <h2>🔴 Points à Traiter</h2>
-          <span class="view-count todo-warning">${todos.length} point(s)</span>
-        </div>
-        <div class="todos-main-list">
-          ${todos.map((t, i) => `
-            <div class="main-card todo-main-card ${t.resolved ? 'resolved' : ''}" data-index="${i}">
-              <div class="todo-main-header">
-                <span class="todo-icon">${t.resolved ? '✅' : '🔴'}</span>
-                <span class="todo-title">${t.title}</span>
-                ${t.priority ? `<span class="priority-tag priority-${t.priority}">${t.priority}</span>` : ''}
-              </div>
-              ${t.context ? `<p class="todo-context">${t.context}</p>` : ''}
-              ${t.section ? `<span class="todo-section">Section: ${t.section}</span>` : ''}
-              <div class="todo-main-actions">
-                <button class="btn-sm btn-resolve" onclick="app.resolveTodo(${i})">✓ Résolu</button>
-                <button class="btn-sm btn-delete" onclick="app.deleteTodo(${i})">✕ Supprimer</button>
-              </div>
-            </div>
-          `).join('')}
-        </div>
-      </div>
-    `;
   }
   
   async loadProject(project) {
@@ -551,7 +388,7 @@ class WritingPartnerApp {
     this.currentProject = project;
     this.projectLoadError = null;
     document.getElementById('currentProjectName').textContent = project.name;
-    document.getElementById('projectTabs').classList.remove('hidden');
+    document.getElementById('todosNav').classList.remove('hidden');
 
     // Un fichier absent donne un projet vide ; un fichier illisible ou corrompu bloque l'écriture
     if (result.success) {
@@ -603,10 +440,7 @@ class WritingPartnerApp {
       this.addChatMessage(`❌ ${this.projectLoadError}`, 'assistant');
     }
 
-    // Populate UI
-    this.populateAllPanels();
-    this.renderScript();
-    this.renderScenarioOutline();
+    this.refreshViews();
 
     if (this.pendingMigration) await this.offerMigration();
   }
@@ -687,9 +521,7 @@ class WritingPartnerApp {
 
     this.pendingMigration = null;
     this.projectData = plan.data;
-    this.populateAllPanels();
-    this.renderScript();
-    this.renderScenarioOutline();
+    this.refreshViews();
     this.setSaveState(this.pendingNotes ? 'dirty' : 'saved');
     this.addChatMessage(`✅ Format du projet mis à jour (v${report.to}). Sauvegarde de l'ancien fichier : ${result.backup}` +
       (options.rolesToSuggestions ? `\n${plan.report.rolesConverted} rôle(s) convertis en suggestions.` : ''), 'assistant');
@@ -740,10 +572,8 @@ class WritingPartnerApp {
       const previousFocus = document.activeElement;
       const overlay = document.createElement('div');
       overlay.className = 'confirm-dialog-overlay';
-      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:9999;';
       overlay.innerHTML = `
-        <div role="dialog" aria-modal="true" aria-labelledby="confirmDialogTitle"
-             style="background:var(--bg-secondary);color:var(--text-primary);padding:24px;border-radius:6px;width:min(560px,90vw);max-height:85vh;overflow:auto;">
+        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="confirmDialogTitle">
           <h3 id="confirmDialogTitle" style="margin:0 0 12px 0;"></h3>
           <div class="confirm-dialog-message" style="white-space:pre-wrap;line-height:1.5;color:var(--text-secondary);"></div>
           ${select ? '<label style="display:block;margin-top:12px;">Sauvegarde : <select id="confirmDialogSelect" style="width:100%;margin-top:4px;padding:6px;"></select></label>' : ''}
@@ -775,7 +605,8 @@ class WritingPartnerApp {
         });
       };
       const onKey = (e) => {
-        if (e.key === 'Escape') { e.preventDefault(); close(false); }
+        if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(false); }
+        if (e.key === 'Tab') this.trapFocus(e, overlay);
       };
       overlay.querySelector('[data-action="cancel"]').addEventListener('click', () => close(false));
       overlay.querySelector('[data-action="confirm"]').addEventListener('click', () => close(true));
@@ -800,7 +631,7 @@ class WritingPartnerApp {
     this.pendingMigration = null;
     this.projectData = this.getEmptyProjectData();
     document.getElementById('currentProjectName').textContent = 'Aucun projet';
-    document.getElementById('projectTabs').classList.add('hidden');
+    document.getElementById('todosNav').classList.add('hidden');
     this.currentDoc = null;
     this.documents = [];
     this.renderDocumentsList();
@@ -811,8 +642,7 @@ class WritingPartnerApp {
     this.updatePosition();
     this.partner.render();
     this.setSaveState('saved');
-    document.getElementById('scriptContent').innerHTML = '<p class="empty-state">Sélectionne un projet</p>';
-    document.getElementById('scenarioOutline').innerHTML = '<p class="empty-state">Sélectionne un projet pour voir sa structure</p>';
+    this.refreshViews();
   }
   
   async createNewProject() {
@@ -827,7 +657,7 @@ class WritingPartnerApp {
     }
 
     if (this.currentDoc) this.partner.rememberDocument(this.currentDoc.name, this.editor.selectionStart);
-    const [notesOk] = await Promise.all([this.flushNotes(), this.partner.flush()]);
+    const [notesOk] = await Promise.all([this.flushNotes(), this.partner.flush(), this.flushProject()]);
     if (!notesOk &&
         !confirm('Le document en cours n\'a pas pu être enregistré. Ouvrir le nouveau projet quand même ?')) {
       await this.loadProjectList();
@@ -841,40 +671,56 @@ class WritingPartnerApp {
     this.addChatMessage(`✓ Projet « ${result.project.name} » créé.`, 'assistant');
   }
   
-  showInputDialog(title, label, defaultValue = '') {
+  // Saisie d'une ligne (nom de projet…) ; textes insérés en textContent
+  showInputDialog(title, label, defaultValue = '', confirmLabel = 'Créer') {
     return new Promise((resolve) => {
+      const previousFocus = document.activeElement;
       const overlay = document.createElement('div');
-      overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:9999;';
-      
+      overlay.className = 'dialog-overlay';
       overlay.innerHTML = `
-        <div style="background:var(--bg-secondary);padding:24px;border-radius:12px;min-width:350px;">
-          <h3 style="margin:0 0 16px 0;color:var(--text-primary);">${title}</h3>
-          <label style="color:var(--text-secondary);font-size:14px;">${label}</label>
-          <input type="text" id="dialogInput"
-            style="width:100%;padding:10px;margin:8px 0 16px;border:1px solid var(--border);border-radius:6px;background:var(--bg-primary);color:var(--text-primary);font-size:15px;outline:none;box-sizing:border-box;">
-          <div style="display:flex;gap:8px;justify-content:flex-end;">
-            <button id="dialogCancel" style="padding:8px 16px;border:none;border-radius:6px;background:var(--bg-tertiary);color:var(--text-secondary);cursor:pointer;">Annuler</button>
-            <button id="dialogConfirm" style="padding:8px 16px;border:none;border-radius:6px;background:var(--accent);color:white;cursor:pointer;">Créer</button>
+        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="inputDialogTitle">
+          <h3 id="inputDialogTitle"></h3>
+          <label for="dialogInput" class="field-label"></label>
+          <input type="text" id="dialogInput" class="dialog-input">
+          <div class="dialog-actions">
+            <button type="button" class="btn-secondary" data-action="cancel">Annuler</button>
+            <button type="button" class="btn-primary" data-action="confirm"></button>
           </div>
-        </div>
-      `;
-      
+        </div>`;
+      overlay.querySelector('#inputDialogTitle').textContent = title;
+      overlay.querySelector('.field-label').textContent = label;
+      overlay.querySelector('[data-action="confirm"]').textContent = confirmLabel;
       document.body.appendChild(overlay);
       const input = overlay.querySelector('#dialogInput');
       input.value = defaultValue;
       input.focus();
-      
-      const close = (value) => { overlay.remove(); resolve(value); };
-      
-      overlay.querySelector('#dialogCancel').onclick = () => close(null);
-      overlay.querySelector('#dialogConfirm').onclick = () => close(input.value);
-      input.onkeydown = (e) => {
-        if (e.key === 'Enter') close(input.value);
-        if (e.key === 'Escape') close(null);
+
+      const close = (value) => {
+        overlay.remove();
+        if (previousFocus && previousFocus.focus) previousFocus.focus();
+        resolve(value);
       };
+      overlay.querySelector('[data-action="cancel"]').onclick = () => close(null);
+      overlay.querySelector('[data-action="confirm"]').onclick = () => close(input.value);
+      overlay.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && e.target === input) close(input.value);
+        if (e.key === 'Escape') { e.stopPropagation(); close(null); }
+        if (e.key === 'Tab') this.trapFocus(e, overlay);
+      });
     });
   }
-  
+
+  // Garde le focus clavier (Tab / Maj+Tab) dans un dialogue ouvert
+  trapFocus(e, container) {
+    const focusable = [...container.querySelectorAll('button, input, select, textarea, [tabindex]:not([tabindex="-1"])')]
+      .filter(el => !el.disabled && el.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+
   // === Editor Events ===
   setupEditorEvents() {
     const notesEditor = document.getElementById('notesEditor');
@@ -1030,14 +876,33 @@ class WritingPartnerApp {
     }, 60);
   }
 
+  // Bandeau : projet › document › section, et la scène liée (numéro, statut) s'il y en a une
   updatePosition() {
     const el = document.getElementById('docPosition');
-    if (!this.currentDoc) {
-      el.textContent = '';
-      return;
+    const hereBtn = document.getElementById('btnSceneHere');
+    const scenes = this.projectData.scenes || [];
+    const scene = this.activeScene();
+    const sceneLabel = scene
+      ? `Scène ${String(scenes.indexOf(scene) + 1).padStart(2, '0')}${scene.title ? ` — ${scene.title}` : ''} · ${window.Structure.statusLabel(scene.status)}`
+      : '';
+    if (this.workspace !== 'write' || !this.currentDoc) {
+      el.textContent = this.workspace === 'structure' ? '› Structure' : this.workspace === 'bible' ? '› Bible' : '';
+      hereBtn.classList.add('hidden');
+    } else {
+      const section = window.PartnerContext.findSection(this.editor.value, this.editor.selectionStart);
+      el.textContent = `› ${this.currentDoc.name} › ${section.title}`;
+      hereBtn.classList.toggle('hidden', !!scene || section.index < 0 || !!this.readOnlyReason() || this.editor.readOnly);
     }
-    const section = window.PartnerContext.findSection(this.editor.value, this.editor.selectionStart);
-    el.textContent = `› ${this.currentDoc.name} › ${section.title}`;
+    if (sceneLabel) {
+      const marker = document.createElement('span');
+      marker.className = 'scene-marker';
+      marker.textContent = sceneLabel;
+      el.appendChild(marker);
+    }
+    if (this.activeSceneMarker !== (scene?.id || null)) {
+      this.activeSceneMarker = scene?.id || null;
+      this.structure?.renderNav();
+    }
   }
   
   setupResizer() {
@@ -1128,450 +993,7 @@ class WritingPartnerApp {
     // Déclenche l'enregistrement automatique comme une saisie clavier
     editor.dispatchEvent(new Event('input'));
   }
-  
-  // === Import Story Bible ===
-  async importStoryBible() {
-    if (!this.currentProject) {
-      this.addChatMessage('⚠️ Sélectionne d\'abord un projet.', 'assistant');
-      return;
-    }
-    if (this.projectLoadError) {
-      this.addChatMessage(`❌ Import impossible : ${this.projectLoadError}`, 'assistant');
-      return;
-    }
-    if (!(await this.ensureMigrated())) return;
 
-    const project = this.currentProject;
-
-    // Créer un input file invisible
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.md,.txt,.markdown';
-
-    input.onchange = async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-
-      this.addChatMessage(`📥 Import de "${file.name}" en cours...`, 'user');
-
-      try {
-        const content = await file.text();
-        if (this.currentProject?.path !== project.path) {
-          this.addChatMessage(`⚠️ Import de "${file.name}" annulé : le projet a changé pendant la lecture.`, 'assistant');
-          return;
-        }
-        const extracted = this.parseStoryBible(content);
-
-        // Fusionner sans rien remplacer
-        const { summary, notes } = this.mergeStoryBibleData(extracted);
-        const saved = await this.saveProject();
-
-        // Rafraîchir l'UI
-        this.populateAllPanels();
-        this.renderScript();
-        this.renderScenarioOutline();
-
-        const changes = this.describeChanges(summary) || 'Aucun élément nouveau : le projet contenait déjà tout.';
-        const extra = notes.length ? `\n\n${notes.join('\n')}` : '';
-        this.addChatMessage(saved
-          ? `✅ Import terminé (rien n'a été supprimé ni remplacé).\n\n${changes}${extra}`
-          : `⚠️ Import appliqué à l'écran mais NON enregistré.\n\n${changes}${extra}`, 'assistant');
-
-      } catch (error) {
-        this.addChatMessage(`❌ Erreur d'import: ${error.message}`, 'assistant');
-      }
-    };
-    
-    input.click();
-  }
-  
-  parseStoryBible(content) {
-    const result = {
-      synopsis: '',
-      detailedSynopsis: '',
-      characters: [],
-      places: [],
-      systems: [],
-      arcs: [],
-      timeline: [],
-      todos: [],
-      notes: []
-    };
-    
-    const lines = content.split('\n');
-    let currentSection = null;
-    let currentSubsection = null;
-    let currentCharacter = null;
-    let currentArc = null;
-    let currentPlace = null;
-    let buffer = [];
-    
-    const flushBuffer = () => {
-      if (buffer.length === 0) return '';
-      const text = buffer.join('\n').trim();
-      buffer = [];
-      return text;
-    };
-    
-    // Sauvegarder l'arc en cours
-    const saveCurrentArc = () => {
-      if (currentArc) {
-        currentArc.description = flushBuffer();
-        result.arcs.push(currentArc);
-        currentArc = null;
-      }
-    };
-    
-    // Sauvegarder le lieu en cours
-    const saveCurrentPlace = () => {
-      if (currentPlace) {
-        currentPlace.description = flushBuffer();
-        result.places.push(currentPlace);
-        currentPlace = null;
-      }
-    };
-    
-    lines.forEach((line, idx) => {
-      const trimmed = line.trim();
-      
-      // Détecter les sections principales (## 1. SYNOPSIS, ## 3. CHARACTERS, etc.)
-      const mainSectionMatch = trimmed.match(/^##\s*(?:📘|📖|👥|🌐|📚|💡)?\s*(\d+)\.\s*(.+)/i);
-      if (mainSectionMatch) {
-        saveCurrentArc();
-        saveCurrentPlace();
-        flushBuffer();
-        const sectionName = mainSectionMatch[2].toUpperCase();
-        
-        if (sectionName.includes('SYNOPSIS') && sectionName.includes('GLOBAL')) {
-          currentSection = 'synopsis';
-        } else if (sectionName.includes('SYNOPSIS') && (sectionName.includes('DETAILED') || sectionName.includes('DÉTAILLÉ'))) {
-          currentSection = 'detailed-synopsis';
-        } else if (sectionName.includes('CHARACTER') || sectionName.includes('PERSONNAGE')) {
-          currentSection = 'characters';
-        } else if (sectionName.includes('WORLD') || sectionName.includes('RULES') || sectionName.includes('RÈGLES')) {
-          currentSection = 'world';
-        } else if (sectionName.includes('ARC') || sectionName.includes('STORY')) {
-          currentSection = 'arcs';
-        } else if (sectionName.includes('IDEAS') || sectionName.includes('NOTES') || sectionName.includes('IDÉES')) {
-          currentSection = 'notes';
-        }
-        currentSubsection = null;
-        currentCharacter = null;
-        return;
-      }
-      
-      // Détecter les sous-sections (### )
-      const subSectionMatch = trimmed.match(/^###\s*(?:🔷|👥|🔴|🟢|🟡|🟠|⚫|🌍|💀|🚀|🦖|🔭|⚡|🔄|🔬|🎭|🧩|🧬|🔧|🚫)?\s*(.+)/);
-      if (subSectionMatch) {
-        saveCurrentArc();
-        saveCurrentPlace();
-        
-        // Si on était dans un personnage, le sauvegarder
-        if (currentCharacter && currentSection === 'characters') {
-          result.characters.push(currentCharacter);
-          currentCharacter = null;
-        }
-        
-        currentSubsection = subSectionMatch[1].trim();
-        
-        // Détecter si c'est un arc (ARC 1, ARC 2, etc.)
-        const arcMatch = currentSubsection.match(/^ARC\s*(\d+)[:\s]*(.+)?/i);
-        if (currentSection === 'arcs' || arcMatch) {
-          currentArc = {
-            name: currentSubsection,
-            description: '',
-            number: arcMatch ? parseInt(arcMatch[1]) : result.arcs.length + 1,
-            status: 'planned'
-          };
-        }
-        
-        // Détecter si c'est un lieu dans la section world
-        if (currentSection === 'world') {
-          const placePatterns = [
-            /^(Mars|Terre|Earth|Moon|Lune)/i,
-            /Mars\s*[—–-]\s*(Passé|Présent|Futur)/i,
-            /Terre\s*[—–-]\s*(Passé|Présent|Futur)/i
-          ];
-          
-          for (const pattern of placePatterns) {
-            if (pattern.test(currentSubsection)) {
-              currentPlace = {
-                name: currentSubsection,
-                description: ''
-              };
-              break;
-            }
-          }
-        }
-        
-        // Détecter si c'est un personnage
-        if (currentSection === 'characters' && 
-            (currentSubsection.includes('PROTAGONISTE') || 
-             currentSubsection.includes('ANTAGONISTE') ||
-             currentSubsection.includes('PRINCIPAL'))) {
-          currentCharacter = {
-            name: '',
-            role: currentSubsection,
-            description: '',
-            traits: []
-          };
-        }
-        
-        return;
-      }
-      
-      // Détecter les tableaux markdown (| ... |)
-      if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
-        const cells = trimmed.split('|').map(c => c.trim()).filter(c => c && !c.match(/^[-:]+$/));
-        
-        if (cells.length >= 2) {
-          // Tables de personnages ou propriétés
-          if (currentCharacter && cells[0].toLowerCase().includes('nom')) {
-            // Ne rien faire, c'est l'en-tête
-          } else if (currentCharacter) {
-            const key = cells[0].toLowerCase().replace(/\*\*/g, '');
-            const value = cells[1];
-            
-            if (key.includes('nom')) currentCharacter.name = value;
-            else if (key.includes('rôle') || key.includes('role')) currentCharacter.role = value;
-            else if (key.includes('objectif')) currentCharacter.objective = value;
-            else if (key.includes('conflit')) currentCharacter.conflict = value;
-            else currentCharacter.description += `${key}: ${value}. `;
-          }
-          
-          // Tables d'archétypes de personnages - SEULEMENT si c'est clairement un nom de personnage
-          if (currentSection === 'characters' && !currentCharacter) {
-            const cellName = cells[0].replace(/\*\*/g, '').trim();
-            // Ignorer les en-têtes et les archétypes génériques
-            const isHeader = /^(archétype|description|attribut|nom|rôle|role|objectif|conflit)/i.test(cellName);
-            const isGenericArchetype = /^(le |la |l'|un |une )/i.test(cellName); // "Le Découvreur", "L'Autorité"
-            const isSeparator = /^[-:=]+$/.test(cellName);
-            
-            if (!isHeader && !isGenericArchetype && !isSeparator && cellName.length > 1) {
-              // Vérifier que ça ressemble à un vrai nom (pas juste un mot descriptif)
-              const looksLikeName = /^[A-ZÀ-Ÿ][a-zà-ÿ]+(?:\s+[A-ZÀ-Ÿ]?[a-zà-ÿ]+)*$/.test(cellName);
-              if (looksLikeName) {
-                result.characters.push({
-                  name: cellName,
-                  role: 'Suggéré',
-                  description: cells[1] || ''
-                });
-              }
-            }
-          }
-          
-          // Tables de systèmes/technologies dans la section world
-          if (currentSection === 'world' && currentSubsection?.toLowerCase().includes('technologie')) {
-            if (!cells[0].match(/^[-]+$/) && cells[0] !== 'Type') {
-              result.systems.push({
-                name: cells[0].replace(/\*\*/g, ''),
-                type: 'Technologie',
-                description: cells[1] || ''
-              });
-            }
-          }
-        }
-        return;
-      }
-      
-      // Détecter les points à traiter [À définir], [?], etc.
-      const todoMatches = trimmed.matchAll(/\[À\s*(définir|développer|traiter|préciser)[^\]]*\]/gi);
-      for (const match of todoMatches) {
-        // Extraire le contexte
-        let context = currentSubsection || currentSection || '';
-        
-        // Chercher ce qui précède le [À ...]
-        const beforeTodo = trimmed.split(match[0])[0].trim();
-        if (beforeTodo) {
-          context = beforeTodo.replace(/\*\*/g, '').replace(/[|:]/g, '').trim();
-        }
-        
-        result.todos.push({
-          title: context ? `Définir ${context}` : match[0],
-          context: currentSubsection || currentSection || '',
-          section: currentSection
-        });
-      }
-      
-      // Questions ouvertes (lignes commençant par - [ ] ou checkbox)
-      const questionMatch = trimmed.match(/^-\s*\[\s*\]\s*(.+)/);
-      if (questionMatch) {
-        result.todos.push({
-          title: questionMatch[1],
-          context: currentSubsection || currentSection || '',
-          section: currentSection
-        });
-        return;
-      }
-      
-      // Ajouter au buffer pour capturer le contenu des arcs/lieux
-      if (trimmed && !trimmed.match(/^[━─═]+$/) && !trimmed.match(/^\*Dernière/) && !trimmed.startsWith('---')) {
-        // Pour les arcs, capturer les bullet points
-        if (currentArc && trimmed.startsWith('-')) {
-          buffer.push(trimmed.substring(1).trim());
-        } 
-        // Pour les lieux, capturer aussi les bullet points
-        else if (currentPlace && trimmed.startsWith('-')) {
-          buffer.push(trimmed.substring(1).trim());
-        }
-        // Synopsis
-        else if (currentSection === 'synopsis' && !trimmed.startsWith('>')) {
-          result.synopsis += trimmed + ' ';
-        }
-      }
-    });
-    
-    // Sauvegarder les derniers éléments en cours
-    if (currentArc) {
-      currentArc.description = buffer.join(' • ');
-      result.arcs.push(currentArc);
-    }
-    
-    if (currentPlace) {
-      currentPlace.description = buffer.join(' • ');
-      result.places.push(currentPlace);
-    }
-    
-    if (currentCharacter) {
-      result.characters.push(currentCharacter);
-    }
-    
-    // Nettoyer le synopsis
-    result.synopsis = result.synopsis.trim();
-    
-    // Déduplication
-    result.characters = result.characters.filter(c => c.name && c.name !== '[À définir]');
-    result.todos = result.todos.filter((t, i, arr) => 
-      arr.findIndex(x => x.title === t.title) === i
-    );
-    result.arcs = result.arcs.filter((a, i, arr) =>
-      arr.findIndex(x => x.name === a.name) === i
-    );
-    
-    return result;
-  }
-  
-  // Fusion non destructive d'un import : rien d'existant n'est remplacé
-  mergeStoryBibleData(extracted) {
-    const notes = [];
-
-    if (extracted.synopsis) {
-      if (!this.projectData.synopsis) {
-        this.projectData.synopsis = extracted.synopsis;
-      } else if (this.projectData.synopsis.trim() !== extracted.synopsis.trim()) {
-        notes.push('Synopsis différent de l\'existant : conservé tel quel, non remplacé.');
-      }
-    }
-
-    const summary = this.applyUpdates({
-      character_updates: (extracted.characters || []).filter(c => c.name),
-      place_updates: extracted.places || [],
-      system_updates: extracted.systems || [],
-      timeline_updates: extracted.timeline || [],
-      todos: extracted.todos || []
-    });
-
-    if (extracted.arcs?.length) {
-      const result = window.ProjectModel.mergeByKey(
-        this.projectData.arcs || [], extracted.arcs, a => window.ProjectModel.normalize(a.name)
-      );
-      this.projectData.arcs = result.list;
-      if (result.added || result.updated) summary.arcs = { added: result.added, updated: result.updated };
-    }
-
-    return { summary, notes };
-  }
-
-  // Afficher la structure du scénario dans la sidebar
-  renderScenarioOutline() {
-    const container = document.getElementById('scenarioOutline');
-    
-    if (!this.currentProject) {
-      container.innerHTML = '<p class="empty-state">Sélectionne un projet pour voir sa structure</p>';
-      return;
-    }
-    
-    let html = '';
-    
-    // Synopsis
-    if (this.projectData.synopsis) {
-      html += `
-        <div class="outline-section">
-          <div class="outline-section-header">📋 Synopsis</div>
-          <div class="outline-synopsis">${this.projectData.synopsis.substring(0, 200)}${this.projectData.synopsis.length > 200 ? '...' : ''}</div>
-        </div>
-      `;
-    }
-    
-    // Arcs
-    if (this.projectData.arcs?.length) {
-      html += `
-        <div class="outline-section">
-          <div class="outline-section-header">📚 Arcs narratifs</div>
-          <div class="outline-arcs">
-            ${this.projectData.arcs.map((arc, i) => `
-              <div class="outline-arc ${arc.status || ''}" data-index="${i}">
-                <span class="arc-status">${this.getArcStatusIcon(arc.status)}</span>
-                <span class="arc-name">${arc.name}</span>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      `;
-    }
-    
-    // Pages du scénario
-    if (this.projectData.script?.length) {
-      html += `
-        <div class="outline-section">
-          <div class="outline-section-header">📄 Pages (${this.projectData.script.length})</div>
-          <div class="outline-pages">
-            ${this.projectData.script.slice(0, 10).map(s => `
-              <div class="outline-page" data-page="${s.page}">
-                <span class="page-num">p.${s.page}</span>
-                <span class="page-preview">${(s.action || s.content || '').substring(0, 30)}...</span>
-              </div>
-            `).join('')}
-            ${this.projectData.script.length > 10 ? `<div class="outline-more">+ ${this.projectData.script.length - 10} autres pages</div>` : ''}
-          </div>
-        </div>
-      `;
-    }
-    
-    // Résumé des éléments
-    html += `
-      <div class="outline-section outline-summary">
-        <div class="outline-section-header">📊 Éléments</div>
-        <div class="outline-stats">
-          <div class="stat-item"><span class="stat-count">${this.projectData.characters?.length || 0}</span> Personnages</div>
-          <div class="stat-item"><span class="stat-count">${this.projectData.places?.length || 0}</span> Lieux</div>
-          <div class="stat-item"><span class="stat-count">${this.projectData.systems?.length || 0}</span> Systèmes</div>
-          <div class="stat-item"><span class="stat-count">${this.projectData.todos?.length || 0}</span> À traiter</div>
-        </div>
-      </div>
-    `;
-    
-    container.innerHTML = html || '<p class="empty-state">Aucune structure définie. Importe une Story Bible ou synchronise tes notes.</p>';
-    
-    // Event listeners pour navigation
-    container.querySelectorAll('.outline-page').forEach(page => {
-      page.addEventListener('click', () => {
-        const pageNum = page.dataset.page;
-        this.navigateToPage(pageNum);
-      });
-    });
-  }
-  
-  getArcStatusIcon(status) {
-    const icons = {
-      'done': '✅',
-      'in-progress': '🔄',
-      'planned': '⬜',
-      'blocked': '⏸️'
-    };
-    return icons[status] || '⬜';
-  }
-  
   navigateToPage(pageNum) {
     // Activer le mode scénario si nécessaire
     this.setEditorMode('script');
@@ -1631,8 +1053,7 @@ class WritingPartnerApp {
       }
       const summary = this.applyUpdates(updates);
       const saved = await this.saveProject();
-      this.populateAllPanels();
-      this.renderScript();
+      this.refreshViews();
       const changes = (this.describeChanges(summary) || 'Aucun élément nouveau.') + notices;
       this.addChatMessage(saved
         ? `✅ ${intro} (rien n'a été supprimé ni remplacé).\n\n${changes}`
@@ -1700,1119 +1121,6 @@ RÈGLES:
     }
   }
 
-  // Convertir le parsing manga en format standard pour l'application
-  convertMangaToUpdates(parsed) {
-    const updates = {
-      script_updates: [],
-      character_updates: [],
-      place_updates: [],
-      system_updates: [],
-      timeline_updates: [],
-      todos: [],
-      // Séquences : index dérivé (pages rattachées, lignes d'introduction conservées)
-      sequences: parsed.sequences.map(s => ({
-        number: s.number, title: s.title, label: s.label, pages: s.pages,
-        _intro: s.intro, sourceLine: s.line
-      }))
-    };
-
-    // Convertir les pages : `_blocks` garde l'ordre exact action / dialogue / pensée et le texte source
-    parsed.pages.forEach(page => {
-      const actionText = page.actions.map(a => a.text).join(' ');
-      const dialogueText = page.dialogues.map(d => `${d.speaker}: "${d.text}"`).join('\n');
-      const thoughtText = page.thoughts.map(t => `${t.speaker} (pensée): ${t.text}`).join('\n');
-      const mainCharacter = page.dialogues[0]?.speaker || page.thoughts[0]?.speaker || null;
-      const lastBlock = page.blocks[page.blocks.length - 1];
-
-      updates.script_updates.push({
-        page: page.number,
-        endNumber: page.endNumber || null,
-        isDoublePage: page.isDoublePage || false,
-        sequence: page.sequence,
-        heading: page.heading || '',
-        action: actionText,
-        dialogue: dialogueText || null,
-        thoughts: thoughtText || null,
-        character: mainCharacter,
-        source: '_NOTES.md',
-        sourceLines: [page.line, lastBlock.line + lastBlock.raw.split('\n').length - 1],
-        _blocks: page.blocks,
-        // Vues séparées conservées pour la compatibilité (l'ordre commun est dans _blocks)
-        _dialogues: page.dialogues,
-        _thoughts: page.thoughts,
-        _actions: page.actions
-      });
-    });
-    
-    // Convertir les personnages avec analyse approfondie
-    const minDialogueForGeneric = 3;
-    const genericRoles = ['présentateur', 'technicien', 'majordome', 'garde', 'soldat', 'voix'];
-    const content = parsed.pages.flatMap(p => p.blocks.map(b => b.raw)).join('\n');
-    
-    // === ANALYSE DU CONTEXTE DU MONDE ===
-    const worldContext = this.analyzeWorldContext(content, parsed.pages);
-    
-    // Stocker le contexte mondial dans les updates
-    updates.worldContext = worldContext;
-    
-    // === GÉNÉRER LES LIEUX ENRICHIS ===
-    const placesMap = new Map();
-    parsed.pages.forEach(page => {
-      if (page.location && page.location.trim()) {
-        const locName = page.location.trim();
-        if (!placesMap.has(locName)) {
-          placesMap.set(locName, {
-            name: locName,
-            firstMention: page.number,
-            sceneCount: 1
-          });
-        } else {
-          placesMap.get(locName).sceneCount++;
-        }
-      }
-    });
-    
-    // Enrichir chaque lieu avec analyse profonde
-    placesMap.forEach((placeData, placeName) => {
-      const enriched = this.enrichPlaceUpdate(placeData, worldContext, parsed.pages);
-      updates.place_updates.push(enriched);
-    });
-    
-    // === GÉNÉRER LES SYSTÈMES DU MONDE ===
-    // Système politique
-    if (worldContext.politics.type !== 'indéterminé') {
-      updates.system_updates.push({
-        name: worldContext.politics.type,
-        category: 'Politique',
-        description: this.generatePoliticsDescription(worldContext.politics),
-        details: {
-          leader: worldContext.politics.leader,
-          hierarchy: worldContext.politics.hierarchy,
-          propaganda: worldContext.politics.propaganda,
-          control: worldContext.politics.control
-        }
-      });
-    }
-    
-    // Système de ressources
-    if (worldContext.resources.scarce.length > 0 || worldContext.resources.controlled.length > 0) {
-      updates.system_updates.push({
-        name: 'Économie de pénurie',
-        category: 'Ressources',
-        description: this.generateResourcesDescription(worldContext.resources),
-        details: {
-          scarce: worldContext.resources.scarce,
-          controlled: worldContext.resources.controlled,
-          implications: worldContext.resources.implications
-        }
-      });
-    }
-    
-    // Structure sociale
-    if (worldContext.society.groups.length > 0) {
-      updates.system_updates.push({
-        name: 'Structure sociale',
-        category: 'Société',
-        description: this.generateSocietyDescription(worldContext.society),
-        details: {
-          groups: worldContext.society.groups,
-          dynamics: worldContext.society.dynamics,
-          tensions: worldContext.society.tensions
-        }
-      });
-    }
-    
-    // Niveau technologique
-    if (worldContext.technology.working.length > 0) {
-      updates.system_updates.push({
-        name: 'Niveau technologique',
-        category: 'Technologie',
-        description: `Technologies fonctionnelles: ${worldContext.technology.working.join(', ')}`,
-        details: worldContext.technology
-      });
-    }
-    
-    // === TIMELINE DU MONDE ===
-    if (worldContext.timeline.events.length > 0) {
-      worldContext.timeline.events.forEach(event => {
-        updates.timeline_updates.push({
-          event: event.name,
-          when: event.when,
-          significance: event.significance
-        });
-      });
-    }
-    
-    // === INDICES NARRATIFS ===
-    updates.narrativeClues = worldContext.narrativeClues;
-    
-    parsed.characters.forEach((char, name) => {
-      const isGeneric = genericRoles.some(r => name.toLowerCase().includes(r));
-      
-      // Garder seulement si : pas générique OU a assez de dialogues
-      if (!isGeneric || char.dialogueCount >= minDialogueForGeneric) {
-        // Analyse approfondie du personnage
-        const analysis = this.analyzeCharacter(name, char, parsed.pages, content);
-        
-        // Le rôle n'est jamais attribué par l'analyse : seulement suggéré, avec sa justification
-        updates.character_updates.push({
-          name: char.name,
-          ...(char.suggestion ? {
-            suggestedRole: char.suggestion.role,
-            suggestionSource: `analyse locale : ${char.suggestion.evidence}`
-          } : {}),
-          type: analysis.type,
-          description: analysis.description,
-          traits: analysis.traits,
-          strengths: analysis.strengths,
-          weaknesses: analysis.weaknesses,
-          goals: analysis.goals,
-          motivations: analysis.motivations,
-          relationships: analysis.relationships,
-          arc: analysis.arc,
-          keyQuotes: analysis.keyQuotes,
-          firstAppearance: char.firstAppearance,
-          dialogueCount: char.dialogueCount
-        });
-      }
-    });
-    
-    return updates;
-  }
-  
-  // === GÉNÉRATEURS DE DESCRIPTIONS POUR LES SYSTÈMES ===
-  
-  generatePoliticsDescription(politics) {
-    let desc = `${politics.type}`;
-    if (politics.leader) {
-      desc += ` dirigé par ${politics.leader.title}. `;
-    }
-    if (politics.propaganda.length > 0) {
-      desc += `Propagande: ${politics.propaganda.join(', ')}. `;
-    }
-    if (politics.control.length > 0) {
-      desc += `Contrôle via: ${politics.control.join(', ')}.`;
-    }
-    return desc;
-  }
-  
-  generateResourcesDescription(resources) {
-    let desc = 'Économie de rareté. ';
-    if (resources.scarce.length > 0) {
-      desc += `Ressources rares: ${resources.scarce.map(r => r.item).join(', ')}. `;
-    }
-    if (resources.implications.length > 0) {
-      desc += resources.implications[0];
-    }
-    return desc;
-  }
-  
-  generateSocietyDescription(society) {
-    let desc = '';
-    if (society.groups.length > 0) {
-      desc += `Groupes: ${society.groups.map(g => g.name).join(', ')}. `;
-    }
-    if (society.dynamics.length > 0) {
-      desc += `Dynamiques: ${society.dynamics.join(', ')}.`;
-    }
-    return desc;
-  }
-  
-  // === ANALYSE APPROFONDIE DES PERSONNAGES ===
-  analyzeCharacter(name, charData, pages, fullContent) {
-    const lowName = name.toLowerCase();
-    const lowContent = fullContent.toLowerCase();
-    
-    // Collecter tous les éléments liés au personnage
-    const dialogues = [];
-    const thoughts = [];
-    const actions = [];
-    const mentionedWith = new Map(); // Autres personnages mentionnés avec lui
-    
-    pages.forEach(page => {
-      // Dialogues du personnage
-      page.dialogues.filter(d => d.speaker.toLowerCase() === lowName).forEach(d => {
-        dialogues.push({ page: page.number, text: d.text });
-      });
-      
-      // Pensées du personnage
-      page.thoughts.filter(t => t.speaker.toLowerCase() === lowName).forEach(t => {
-        thoughts.push({ page: page.number, text: t.text });
-      });
-      
-      // Actions qui le mentionnent
-      page.actions.filter(a => a.text.toLowerCase().includes(lowName)).forEach(a => {
-        actions.push({ page: page.number, text: a.text });
-      });
-      
-      // Relations - qui parle à qui dans la même page
-      const speakers = new Set([...page.dialogues.map(d => d.speaker), ...page.thoughts.map(t => t.speaker)]);
-      if (speakers.has(name)) {
-        speakers.forEach(s => {
-          if (s !== name) {
-            mentionedWith.set(s, (mentionedWith.get(s) || 0) + 1);
-          }
-        });
-      }
-    });
-    
-    // === ANALYSE DU RÔLE NARRATIF ===
-    const role = charData.suggestion?.role || '';
-    const type = this.determineCharacterType(name, role, dialogues, thoughts, actions, lowContent);
-    
-    // === ANALYSE DES TRAITS DE CARACTÈRE ===
-    const traits = this.extractTraits(dialogues, thoughts, actions, lowContent, lowName);
-    
-    // === FORCES ET FAIBLESSES ===
-    const { strengths, weaknesses } = this.extractStrengthsWeaknesses(name, dialogues, thoughts, actions, lowContent);
-    
-    // === OBJECTIFS ET MOTIVATIONS ===
-    const { goals, motivations } = this.extractGoalsMotivations(name, dialogues, thoughts, lowContent);
-    
-    // === RELATIONS ===
-    const relationships = [];
-    mentionedWith.forEach((count, otherChar) => {
-      const relationshipType = this.guessRelationship(name, otherChar, lowContent);
-      if (relationshipType) {
-        relationships.push({ character: otherChar, type: relationshipType, interactions: count });
-      }
-    });
-    
-    // === ARC DE DÉVELOPPEMENT ===
-    const arc = this.detectCharacterArc(name, dialogues, thoughts, actions, pages);
-    
-    // === CITATIONS CLÉS ===
-    const keyQuotes = this.extractKeyQuotes(dialogues, thoughts);
-    
-    // === DESCRIPTION SYNTHÉTIQUE ===
-    const description = this.generateCharacterDescription(name, role, type, traits, goals);
-    
-    return {
-      role, type, description, traits, strengths, weaknesses,
-      goals, motivations, relationships, arc, keyQuotes
-    };
-  }
-  
-  determineCharacterType(name, role, dialogues, thoughts, actions, lowContent) {
-    const lowName = name.toLowerCase();
-    
-    // Basé sur le rôle et le comportement
-    if (role === 'Protagoniste') return 'Héros / Personnage principal';
-    if (role === 'Antagoniste') {
-      if (lowContent.includes('père') && lowContent.includes(lowName)) return 'Tyran bienveillant';
-      return 'Antagoniste principal';
-    }
-    if (role === 'Traître') return 'Faux allié / Traître';
-    if (role === 'Rebelle') return 'Allié rebelle';
-    if (role === 'Figurant') return 'Personnage secondaire';
-    
-    // Si beaucoup de pensées mais peu de dialogues → personnage introspectif
-    if (thoughts.length > dialogues.length) return 'Personnage conflictuel';
-    
-    return 'Personnage de soutien';
-  }
-  
-  extractTraits(dialogues, thoughts, actions, lowContent, lowName) {
-    const traits = [];
-    
-    // Analyse des patterns dans les dialogues et pensées
-    const allText = [...dialogues.map(d => d.text), ...thoughts.map(t => t.text)].join(' ').toLowerCase();
-    
-    // Traits positifs
-    if (allText.match(/merci|reconnaissance|gratitude/)) traits.push('Reconnaissant(e)');
-    if (allText.match(/je.*protéger|sauver|aider/)) traits.push('Protecteur/trice');
-    if (allText.match(/devoir|honneur|mission/)) traits.push('Dévoué(e)');
-    if (allText.match(/je dois|il faut que|pas le choix/)) traits.push('Déterminé(e)');
-    if (allText.match(/perspicace|remarqu|observ/)) traits.push('Observateur/trice');
-    if (lowContent.includes(`${lowName} réfléchi`) || thoughts.length > 5) traits.push('Réfléchi(e)');
-    
-    // Traits négatifs ou complexes
-    if (allText.match(/impossible|je.*croire|choqué/)) traits.push('Idéaliste');
-    if (allText.match(/anxieu|inqui[eè]t|peur|crainte/)) traits.push('Anxieux/se');
-    if (allText.match(/confiance|croire en/i) && allText.match(/père|supérieur/)) traits.push('Loyal(e)');
-    if (allText.match(/sacrifice|nécessaire|pour.*bien/)) traits.push('Pragmatique');
-    if (allText.match(/pouvoir|contrôle|domin/)) traits.push('Autoritaire');
-    if (allText.match(/mentir|cacher|secret/)) traits.push('Dissimulateur/trice');
-    
-    // Traits militaires
-    if (lowContent.includes('salut militaire') || lowContent.includes('capitaine') || lowContent.includes('lieutenant')) {
-      traits.push('Discipliné(e)');
-    }
-    
-    return [...new Set(traits)].slice(0, 6); // Max 6 traits
-  }
-  
-  extractStrengthsWeaknesses(name, dialogues, thoughts, actions, lowContent) {
-    const lowName = name.toLowerCase();
-    const strengths = [];
-    const weaknesses = [];
-    
-    const allText = [...dialogues.map(d => d.text), ...thoughts.map(t => t.text)].join(' ').toLowerCase();
-    
-    // Forces
-    if (lowContent.includes('meilleurs résultats') || lowContent.includes('exemplaire')) {
-      strengths.push('Excellence académique/professionnelle');
-    }
-    if (lowContent.includes(`${lowName}.*compétent`) || lowContent.includes('plus jeune')) {
-      strengths.push('Talent exceptionnel');
-    }
-    if (allText.match(/je.*trouver.*moyen|solution/)) strengths.push('Résolution de problèmes');
-    if (thoughts.length > 3) strengths.push('Introspection');
-    if (lowContent.includes('expérience') && lowContent.includes(lowName)) strengths.push('Expérience');
-    if (lowContent.includes('confiance') && !allText.includes('confiance aveugle')) {
-      strengths.push('Inspire confiance');
-    }
-    
-    // Faiblesses
-    if (allText.match(/je ne.*croire|impossible/)) weaknesses.push('Difficulté à accepter la réalité');
-    if (allText.match(/confiance.*père|loyal.*père/)) weaknesses.push('Loyauté aveugle (initialement)');
-    if (allText.match(/je ne peux pas|tuer/)) weaknesses.push('Conflits moraux');
-    if (lowContent.includes('surprise') && lowContent.includes(lowName)) weaknesses.push('Naïveté');
-    if (allText.match(/seul|isolé/)) weaknesses.push('Isolement');
-    
-    return { 
-      strengths: [...new Set(strengths)].slice(0, 4), 
-      weaknesses: [...new Set(weaknesses)].slice(0, 4) 
-    };
-  }
-  
-  extractGoalsMotivations(name, dialogues, thoughts, lowContent) {
-    const goals = [];
-    const motivations = [];
-    const lowName = name.toLowerCase();
-    
-    const allThoughts = thoughts.map(t => t.text).join(' ').toLowerCase();
-    const allDialogues = dialogues.map(d => d.text).join(' ').toLowerCase();
-    
-    // Objectifs explicites dans les pensées
-    if (allThoughts.match(/je dois.*sauver|protéger/)) goals.push('Sauver/protéger quelqu\'un');
-    if (allThoughts.match(/trouver.*moyen|solution/)) goals.push('Trouver une alternative');
-    if (allThoughts.match(/éliminer|débarrasser|mettre.*terme/)) goals.push('Éliminer une menace');
-    if (allThoughts.match(/comprendre|découvrir.*vérité/)) goals.push('Découvrir la vérité');
-    
-    // Objectifs dans les dialogues
-    if (allDialogues.match(/pour.*bien.*peuple|abri|humanité/)) goals.push('Servir le bien commun');
-    if (allDialogues.match(/mission|devoir/)) goals.push('Accomplir sa mission');
-    
-    // Motivations (pourquoi)
-    if (lowContent.includes('orphelin') && lowContent.includes(lowName)) {
-      motivations.push('Prouver sa valeur (orphelin)');
-    }
-    if (allThoughts.match(/père.*fait.*pour/)) motivations.push('Gratitude envers une figure d\'autorité');
-    if (allThoughts.match(/ami|even|ensemble/)) motivations.push('Loyauté envers ses amis');
-    if (lowContent.includes('régime') || lowContent.includes('règne')) {
-      motivations.push('Libérer les opprimés');
-    }
-    if (allDialogues.match(/confiance|fiert[ée]/)) motivations.push('Maintenir sa réputation');
-    
-    return {
-      goals: [...new Set(goals)].slice(0, 3),
-      motivations: [...new Set(motivations)].slice(0, 3)
-    };
-  }
-  
-  guessRelationship(char1, char2, lowContent) {
-    const pair = `${char1.toLowerCase()}.*${char2.toLowerCase()}`;
-    const pairReverse = `${char2.toLowerCase()}.*${char1.toLowerCase()}`;
-    
-    // Patterns de relation
-    if (lowContent.match(new RegExp(`${pair}.*ami|${pairReverse}.*ami`, 'i'))) return 'Ami(e)';
-    if (lowContent.match(new RegExp(`${pair}.*ennemi|${pairReverse}.*ennemi`, 'i'))) return 'Ennemi';
-    if (lowContent.match(/père/) && (char1.toLowerCase() === 'keyn' || char2.toLowerCase() === 'keyn')) return 'Supérieur/Figure paternelle';
-    if (lowContent.match(new RegExp(`${char1.toLowerCase()}.*sous.*ordres`))) return 'Subordonné';
-    if (lowContent.match(new RegExp(`ensemble|côte à côte|équipe`))) return 'Coéquipier';
-    
-    return 'Connaît';
-  }
-  
-  detectCharacterArc(name, dialogues, thoughts, actions, pages) {
-    const lowName = name.toLowerCase();
-    
-    // Analyser l'évolution entre le début et la fin
-    const totalPages = pages.length;
-    const firstThird = Math.floor(totalPages / 3);
-    const lastThird = totalPages - firstThird;
-    
-    const earlyThoughts = thoughts.filter(t => t.page <= firstThird).map(t => t.text).join(' ').toLowerCase();
-    const lateThoughts = thoughts.filter(t => t.page >= lastThird).map(t => t.text).join(' ').toLowerCase();
-    
-    // Détecter le changement
-    if (earlyThoughts.includes('confiance') && lateThoughts.includes('impossible')) {
-      return 'De la confiance aveugle au doute';
-    }
-    if (earlyThoughts.includes('devoir') && lateThoughts.includes('choix')) {
-      return 'Du devoir au libre arbitre';
-    }
-    if (lateThoughts.includes('sauver') || lateThoughts.includes('trouver.*moyen')) {
-      return 'Prise de conscience et rébellion';
-    }
-    if (lateThoughts.includes('détermin')) {
-      return 'Vers la détermination';
-    }
-    
-    return null;
-  }
-  
-  extractKeyQuotes(dialogues, thoughts) {
-    const quotes = [];
-    
-    // Prioritiser les pensées (plus révélatrices)
-    thoughts.slice(0, 3).forEach(t => {
-      if (t.text.length > 20 && t.text.length < 150) {
-        quotes.push({ type: 'pensée', text: t.text, page: t.page });
-      }
-    });
-    
-    // Ajouter quelques dialogues significatifs
-    dialogues.filter(d => d.text.length > 30 && d.text.length < 150).slice(0, 2).forEach(d => {
-      quotes.push({ type: 'dialogue', text: d.text, page: d.page });
-    });
-    
-    return quotes.slice(0, 4);
-  }
-  
-  generateCharacterDescription(name, role, type, traits, goals) {
-    let desc = `${name} est `;
-    
-    if (role === 'Protagoniste') {
-      desc += 'le personnage principal de l\'histoire. ';
-    } else if (role === 'Antagoniste') {
-      desc += 'l\'antagoniste principal. ';
-    } else {
-      desc += `un personnage ${type.toLowerCase()}. `;
-    }
-    
-    if (traits.length > 0) {
-      desc += `${traits.slice(0, 3).join(', ')}. `;
-    }
-    
-    if (goals.length > 0) {
-      desc += `Son objectif : ${goals[0].toLowerCase()}.`;
-    }
-    
-    return desc;
-  }
-  
-  // === ANALYSE APPROFONDIE DU MONDE ===
-  
-  analyzeWorldContext(fullContent, pages) {
-    const context = {
-      setting: this.detectSetting(fullContent),
-      politics: this.detectPoliticalSystem(fullContent, pages),
-      resources: this.detectResources(fullContent, pages),
-      society: this.detectSocialStructure(fullContent, pages),
-      technology: this.detectTechnologyLevel(fullContent, pages),
-      timeline: this.detectWorldTimeline(fullContent),
-      atmosphere: this.detectAtmosphere(fullContent, pages),
-      narrativeClues: this.extractNarrativeClues(fullContent, pages)
-    };
-    return context;
-  }
-  
-  detectSetting(content) {
-    const low = content.toLowerCase();
-    const settings = [];
-    
-    // Détection d'environnement
-    const envPatterns = {
-      'souterrain': /abri|bunker|souterrain|sous\s*terre|tunnel|cave/i,
-      'post-apocalyptique': /effondrement|apocal|ruines|surviv|fin du monde|après la chute/i,
-      'dystopie': /dictateur|régime|contrôle|surveillance|père.*dirige|oppression/i,
-      'isolé': /isolé|coupé du monde|seuls.*survivants|dernier.*refuge/i,
-      'militarisé': /soldats?|garde|patrouill|rang|capitaine|lieutenant|mission/i,
-      'urbain-dévasté': /ville.*détruite|ruines.*urbain|immeubles.*effondr/i,
-      'nature-hostile': /toxique|air.*mortel|radiation|contamin/i
-    };
-    
-    Object.entries(envPatterns).forEach(([type, pattern]) => {
-      if (pattern.test(content)) {
-        settings.push(type);
-      }
-    });
-    
-    // Détection temporelle
-    const timeMatch = content.match(/(\d+)\s*ans?\s*(?:après|depuis|plus tard)/);
-    const timeInfo = timeMatch ? `${timeMatch[1]} ans après un événement majeur` : null;
-    
-    return {
-      types: settings,
-      timespan: timeInfo,
-      primarySetting: settings[0] || 'indéterminé'
-    };
-  }
-  
-  detectPoliticalSystem(content, pages) {
-    const low = content.toLowerCase();
-    const politics = {
-      type: 'indéterminé',
-      leader: null,
-      hierarchy: [],
-      propaganda: [],
-      control: []
-    };
-    
-    // Détecter le type de régime
-    if (/père.*fonda|le père.*dirige|père.*commande|le père.*décid/i.test(content)) {
-      politics.type = 'Autocratie patriarcale';
-      politics.leader = { title: 'Le Père', description: 'Figure fondatrice et autoritaire' };
-    } else if (/conseil|assemblée|vote/i.test(content)) {
-      politics.type = 'Conseil';
-    } else if (/roi|reine|royaume/i.test(content)) {
-      politics.type = 'Monarchie';
-    } else if (/dictateur|tyran/i.test(content)) {
-      politics.type = 'Dictature';
-    }
-    
-    // Détecter les rangs/hiérarchie
-    const ranks = [];
-    const rankPatterns = [
-      /capitaine/gi, /lieutenant/gi, /général/gi, /commandant/gi,
-      /garde/gi, /soldat/gi, /héros/gi, /élu/gi, /conseiller/gi
-    ];
-    rankPatterns.forEach(p => {
-      const match = content.match(p);
-      if (match) ranks.push(match[0]);
-    });
-    politics.hierarchy = [...new Set(ranks)];
-    
-    // Détecter la propagande
-    const propagandaPatterns = [
-      { pattern: /héros.*honneur|sacrifice.*gloire/i, theme: 'Glorification du sacrifice' },
-      { pattern: /pour (?:le |l\')abri|sauver.*communauté|protéger.*nôtres/i, theme: 'Collectivisme forcé' },
-      { pattern: /mission.*noble|devoir.*sacré/i, theme: 'Sacralisation du devoir' },
-      { pattern: /ennemi.*dehors|danger.*extérieur|menace.*surface/i, theme: 'Peur de l\'extérieur' }
-    ];
-    propagandaPatterns.forEach(({ pattern, theme }) => {
-      if (pattern.test(content)) politics.propaganda.push(theme);
-    });
-    
-    // Mécanismes de contrôle
-    const controlPatterns = [
-      { pattern: /caméra|surveillance|observ|espionn/i, control: 'Surveillance' },
-      { pattern: /interdit|défendu|puni|châtiment/i, control: 'Punition' },
-      { pattern: /sélection|choisir.*envoy|désign/i, control: 'Sélection forcée' },
-      { pattern: /secret|cach|dissimul|vérité.*tu/i, control: 'Information contrôlée' }
-    ];
-    controlPatterns.forEach(({ pattern, control }) => {
-      if (pattern.test(content)) politics.control.push(control);
-    });
-    
-    return politics;
-  }
-  
-  detectResources(content, pages) {
-    const resources = {
-      scarce: [],
-      valuable: [],
-      controlled: [],
-      implications: []
-    };
-    
-    // Ressources rares (réactions émotionnelles = rareté)
-    const scarcityPatterns = [
-      { pattern: /(?:jamais vu|première fois.*vo|n'avai[st] jamais|incroyable.*c'est un).*?([\wéèêàâùûîïôç]+)/i, extract: true },
-      { pattern: /(?:poisson|viande|fruit|légume).*(?:rare|précieux|luxe)/i, item: 'nourriture fraîche' },
-      { pattern: /eau.*(?:rationn|compt|précieu)/i, item: 'eau' },
-      { pattern: /(?:médicament|médecine|soin).*(?:manqu|rare)/i, item: 'médicaments' }
-    ];
-    
-    // Analyser les dialogues pour réactions de surprise/émerveillement
-    pages.forEach(page => {
-      page.dialogues.forEach(d => {
-        const text = d.text.toLowerCase();
-        // Si quelqu'un s'émerveille devant quelque chose de banal = c'est rare
-        if (/c'est.*incroyable|jamais vu|première fois|magnifique|extraordinaire/i.test(d.text)) {
-          const objectMatch = d.text.match(/(?:un |une |le |la |des |les )([\wéèêàâùûîïôç]+)/i);
-          if (objectMatch) {
-            const item = objectMatch[1].toLowerCase();
-            // Filtrer les mots trop génériques
-            if (!['chose', 'truc', 'ça', 'cela', 'ce'].includes(item)) {
-              resources.scarce.push({
-                item: item,
-                evidence: `Réaction d'émerveillement : "${d.text.substring(0, 60)}..."`,
-                implication: `${item} est rare/précieux dans ce monde`
-              });
-            }
-          }
-        }
-      });
-    });
-    
-    // Ressources contrôlées
-    if (/ration|distribu|allou|quotas?/i.test(content)) {
-      resources.controlled.push({ type: 'Système de rationnement', implication: 'Ressources limitées, contrôle étatique' });
-    }
-    if (/mission.*récupér|expédition.*chercher|sortie.*trouver/i.test(content)) {
-      resources.controlled.push({ type: 'Expéditions de récupération', implication: 'Dépendance à l\'extérieur hostile' });
-    }
-    
-    // Déduire les implications
-    if (resources.scarce.length > 0) {
-      resources.implications.push('Société de pénurie - chaque ressource compte');
-    }
-    if (resources.controlled.length > 0) {
-      resources.implications.push('Le pouvoir contrôle la distribution - dépendance forcée');
-    }
-    
-    return resources;
-  }
-  
-  detectSocialStructure(content, pages) {
-    const society = {
-      groups: [],
-      dynamics: [],
-      tensions: [],
-      customs: []
-    };
-    
-    // Groupes sociaux
-    const groupPatterns = [
-      { pattern: /enfants? de l'abri|né.*dans l'abri|génération.*abri/i, group: 'Enfants de l\'abri', desc: 'Nés après l\'effondrement, n\'ont jamais connu l\'ancien monde' },
-      { pattern: /anciens?|vétérans?|ceux d'avant|génération.*surface/i, group: 'Les Anciens', desc: 'Survivants de l\'ancien monde, porteurs de mémoire' },
-      { pattern: /orphelin/i, group: 'Orphelins', desc: 'Sans parents, vulnérables mais potentiellement libres' },
-      { pattern: /soldat|garde|militaire/i, group: 'Forces armées', desc: 'Bras armé du pouvoir' },
-      { pattern: /héros|élu|choisi/i, group: 'Les Héros/Élus', desc: 'Statut spécial, possiblement sacrificiel' }
-    ];
-    
-    groupPatterns.forEach(({ pattern, group, desc }) => {
-      if (pattern.test(content)) {
-        society.groups.push({ name: group, description: desc });
-      }
-    });
-    
-    // Dynamiques sociales
-    if (/jeunes?.*vieux|anciens?.*nouvell|génération.*conflit/i.test(content)) {
-      society.dynamics.push('Fossé générationnel');
-    }
-    if (/loyal|fidèle|dévoué.*père|obéi/i.test(content)) {
-      society.dynamics.push('Culture de loyauté/obéissance');
-    }
-    if (/secret|cach|conspir|vérité.*découvr/i.test(content)) {
-      society.dynamics.push('Secrets et révélations');
-    }
-    
-    // Tensions
-    const tensionSigns = [];
-    pages.forEach(page => {
-      page.dialogues.forEach(d => {
-        if (/mensonge|menteur|trahi|trahison|vérité|cach/i.test(d.text)) {
-          tensionSigns.push(d.text.substring(0, 50));
-        }
-      });
-    });
-    if (tensionSigns.length > 0) {
-      society.tensions.push({ type: 'Méfiance croissante', evidence: tensionSigns.slice(0, 3) });
-    }
-    
-    return society;
-  }
-  
-  detectTechnologyLevel(content, pages) {
-    const tech = {
-      level: 'post-industriel dégradé',
-      working: [],
-      lost: [],
-      restricted: []
-    };
-    
-    // Technologies fonctionnelles
-    const workingTech = [
-      { pattern: /ascenseur/i, tech: 'Ascenseur (mécanique)' },
-      { pattern: /caméra|surveillance/i, tech: 'Système de surveillance' },
-      { pattern: /générateur|électric/i, tech: 'Électricité (limitée)' },
-      { pattern: /radio|communic/i, tech: 'Communications' },
-      { pattern: /arme|fusil|pistolet/i, tech: 'Armes à feu' },
-      { pattern: /masque.*(?:gaz|filtr|respirat)/i, tech: 'Équipement de protection' }
-    ];
-    
-    workingTech.forEach(({ pattern, tech: techName }) => {
-      if (pattern.test(content)) tech.working.push(techName);
-    });
-    
-    // Technologies perdues/mentionnées avec nostalgie
-    if (/avant.*(?:avion|voiture|internet|téléphone)/i.test(content)) {
-      tech.lost.push('Technologies de communication/transport avancées');
-    }
-    
-    return tech;
-  }
-  
-  detectWorldTimeline(content) {
-    const timeline = {
-      events: [],
-      currentEra: 'indéterminé'
-    };
-    
-    // Événement majeur
-    const collapseMatch = content.match(/(\d+)\s*ans?\s*(?:après|depuis)\s*(?:l'effondrement|la chute|le début|la catastrophe|l'apocalypse)/i);
-    if (collapseMatch) {
-      timeline.events.push({
-        name: 'L\'Effondrement',
-        when: `Il y a ${collapseMatch[1]} ans`,
-        significance: 'Événement fondateur du monde actuel'
-      });
-      timeline.currentEra = `${collapseMatch[1]} ans après l'Effondrement`;
-    }
-    
-    // Fondation de l'abri
-    const shelterMatch = content.match(/(?:le père|keyn).*(?:fond|créé|constru).*abri/i);
-    if (shelterMatch) {
-      timeline.events.push({
-        name: 'Fondation de l\'Abri',
-        when: 'Peu après l\'Effondrement',
-        significance: 'Création du refuge, naissance du régime'
-      });
-    }
-    
-    return timeline;
-  }
-  
-  detectAtmosphere(content, pages) {
-    const atmosphere = {
-      dominant: [],
-      recurring: []
-    };
-    
-    // Émotions dominantes dans les dialogues
-    const emotionCounts = {
-      peur: 0, espoir: 0, colère: 0, tristesse: 0,
-      tension: 0, désespoir: 0, détermination: 0
-    };
-    
-    pages.forEach(page => {
-      page.dialogues.forEach(d => {
-        const text = d.text.toLowerCase();
-        if (/peur|terrif|effray|craind/i.test(text)) emotionCounts.peur++;
-        if (/espoir|espèr|rêve|un jour/i.test(text)) emotionCounts.espoir++;
-        if (/colère|furieu|rage|énervé/i.test(text)) emotionCounts.colère++;
-        if (/triste|pleure|larme|deuil/i.test(text)) emotionCounts.tristesse++;
-        if (/danger|menace|attention|prudent/i.test(text)) emotionCounts.tension++;
-        if (/fin|tout est perdu|plus d'espoir/i.test(text)) emotionCounts.désespoir++;
-        if (/doit|faut|va.*réussir|n'abandonn/i.test(text)) emotionCounts.détermination++;
-      });
-    });
-    
-    // Trier par fréquence
-    const sorted = Object.entries(emotionCounts)
-      .filter(([_, v]) => v > 0)
-      .sort((a, b) => b[1] - a[1]);
-    
-    atmosphere.dominant = sorted.slice(0, 3).map(([emotion]) => emotion);
-    
-    return atmosphere;
-  }
-  
-  extractNarrativeClues(content, pages) {
-    const clues = [];
-    
-    // Pattern 1: Réaction disproportionnée = indice sur le monde
-    pages.forEach(page => {
-      page.dialogues.forEach(d => {
-        // Émerveillement devant le banal
-        if (/(?:c'est|regarde|wow|incroyable|magnifique).*(?:un |une )([\wéèêàâùûîïôç]+)/i.test(d.text)) {
-          const match = d.text.match(/(?:un |une )([\wéèêàâùûîïôç]+)/i);
-          if (match && !['truc', 'chose', 'idée'].includes(match[1].toLowerCase())) {
-            clues.push({
-              type: 'Rareté implicite',
-              observation: `Réaction forte devant "${match[1]}"`,
-              implication: `${match[1]} est rare/inconnu dans ce monde`,
-              characterInsight: `Le personnage n'a probablement jamais vu/connu cela`,
-              worldInsight: `Indique une pénurie ou disparition de ${match[1]}`
-            });
-          }
-        }
-        
-        // Questions naïves = ignorance générationnelle
-        if (/c'est quoi|qu'est-ce que c'est|ça veut dire quoi/i.test(d.text)) {
-          const aboutMatch = d.text.match(/(?:c'est quoi|qu'est-ce que c'est)(?: que)?\s*(?:un |une |le |la )?([\wéèêàâùûîïôç]+)/i);
-          if (aboutMatch) {
-            clues.push({
-              type: 'Ignorance générationnelle',
-              observation: `Question sur "${aboutMatch[1]}"`,
-              implication: `Cette connaissance a été perdue`,
-              characterInsight: `Né après l'effondrement, éducation limitée`,
-              worldInsight: `Rupture avec l'ancien monde`
-            });
-          }
-        }
-      });
-    });
-    
-    // Pattern 2: Dialogue contenant "avant" ou "autrefois"
-    pages.forEach(page => {
-      page.dialogues.forEach(d => {
-        if (/avant.*(?:on pouvait|il y avait|les gens)|autrefois/i.test(d.text)) {
-          clues.push({
-            type: 'Mémoire de l\'ancien monde',
-            observation: d.text.substring(0, 80) + '...',
-            implication: 'Contraste ancien/nouveau monde',
-            worldInsight: 'Le personnage qui parle a connu l\'avant'
-          });
-        }
-      });
-    });
-    
-    // Pattern 3: Vérités cachées révélées
-    pages.forEach(page => {
-      page.dialogues.forEach(d => {
-        if (/(?:la vérité|en réalité|ce qu'on ne dit pas|le secret|ils ne savent pas)/i.test(d.text)) {
-          clues.push({
-            type: 'Vérité cachée',
-            observation: d.text.substring(0, 80) + '...',
-            implication: 'Le régime dissimule des informations',
-            worldInsight: 'Système basé sur le mensonge'
-          });
-        }
-      });
-    });
-    
-    return clues;
-  }
-  
-  // === ANALYSE APPROFONDIE DES LIEUX ===
-  
-  analyzePlaceDeep(placeName, pages, worldContext) {
-    const analysis = {
-      atmosphere: [],
-      access: 'indéterminé',
-      significance: [],
-      dangerLevel: 'inconnu',
-      whoGoesHere: [],
-      secrets: []
-    };
-    
-    const low = placeName.toLowerCase();
-    let placeContent = '';
-    
-    // Collecter tout ce qui mentionne ce lieu
-    pages.forEach(page => {
-      if (page.location && page.location.toLowerCase().includes(low)) {
-        // Tout le contenu de cette scène
-        page.dialogues.forEach(d => {
-          placeContent += d.text + ' ';
-        });
-        page.actions.forEach(a => {
-          placeContent += a + ' ';
-        });
-        
-        // Qui apparaît ici ?
-        page.dialogues.forEach(d => {
-          if (!analysis.whoGoesHere.includes(d.speaker)) {
-            analysis.whoGoesHere.push(d.speaker);
-          }
-        });
-      }
-    });
-    
-    // Analyser l'atmosphère
-    if (/sombre|noir|obscur|ténèbres/i.test(placeContent)) analysis.atmosphere.push('Sombre');
-    if (/froid|glacial|gelé/i.test(placeContent)) analysis.atmosphere.push('Froid');
-    if (/oppressant|étouff|claustro/i.test(placeContent)) analysis.atmosphere.push('Oppressant');
-    if (/danger|menace|risqu/i.test(placeContent)) analysis.atmosphere.push('Dangereux');
-    if (/calme|paisible|tranquil/i.test(placeContent)) analysis.atmosphere.push('Calme');
-    if (/secret|cach|interdit/i.test(placeContent)) analysis.atmosphere.push('Mystérieux');
-    
-    // Déterminer l'accès
-    if (/interdit|défendu|autoris.*seul|accès.*restreint/i.test(placeContent)) {
-      analysis.access = 'Restreint';
-    } else if (/public|tout le monde|commun/i.test(placeContent)) {
-      analysis.access = 'Public';
-    } else if (/secret|cach|personne ne sait/i.test(placeContent)) {
-      analysis.access = 'Secret';
-    }
-    
-    // Signification narrative
-    if (/réuni|rassembl|cérémonie/i.test(placeContent)) {
-      analysis.significance.push('Lieu de rassemblement');
-    }
-    if (/découvr|révél|vérité/i.test(placeContent)) {
-      analysis.significance.push('Lieu de révélation');
-    }
-    if (/combat|affrontement|bataille/i.test(placeContent)) {
-      analysis.significance.push('Lieu de confrontation');
-    }
-    if (/décision|choix|tournant/i.test(placeContent)) {
-      analysis.significance.push('Lieu de décision cruciale');
-    }
-    
-    return analysis;
-  }
-  
-  // === ENRICHIR LES UPDATES AVEC LE CONTEXTE MONDE ===
-  
-  enrichPlaceUpdate(place, worldContext, pages) {
-    const deepAnalysis = this.analyzePlaceDeep(place.name, pages, worldContext);
-    
-    return {
-      ...place,
-      atmosphere: deepAnalysis.atmosphere,
-      access: deepAnalysis.access,
-      significance: deepAnalysis.significance,
-      frequentedBy: deepAnalysis.whoGoesHere,
-      worldConnection: this.connectPlaceToWorld(place.name, worldContext)
-    };
-  }
-  
-  connectPlaceToWorld(placeName, worldContext) {
-    const connections = [];
-    const low = placeName.toLowerCase();
-    
-    // Connexion avec le système politique
-    if (worldContext.politics.type !== 'indéterminé') {
-      if (/salle.*commande|bureau.*père|centre.*contrôle/i.test(low)) {
-        connections.push({
-          aspect: 'Politique',
-          connection: 'Centre du pouvoir',
-          implication: 'Lieu stratégique du régime'
-        });
-      }
-    }
-    
-    // Connexion avec les ressources
-    if (/réserve|stockage|entrepôt|cuisine/i.test(low)) {
-      connections.push({
-        aspect: 'Ressources',
-        connection: 'Stockage/Distribution',
-        implication: 'Accès contrôlé aux ressources'
-      });
-    }
-    
-    // Connexion avec la surface/extérieur
-    if (/ascenseur|sas|sortie|surface|extérieur/i.test(low)) {
-      connections.push({
-        aspect: 'Frontière',
-        connection: 'Lien avec l\'extérieur',
-        implication: 'Zone de transition, danger potentiel'
-      });
-    }
-    
-    return connections;
-  }
-  
-  // Parsing local sans API - détection de patterns
-  parseNotesLocally(notes) {
-    // Détecter si c'est un script manga
-    if (window.MangaParser.isMangaScript(notes)) {
-      const mangaParsed = window.MangaParser.parse(notes);
-      const updates = this.convertMangaToUpdates(mangaParsed);
-      const aliases = window.MangaParser.aliasCandidates(mangaParsed.characters.keys());
-      updates._notices = [
-        ...mangaParsed.warnings,
-        ...aliases.map(a => `Noms proches gardés séparés (à fusionner vous-même si c'est la même personne) : « ${a.short} » / « ${a.long} »`)
-      ];
-      return updates;
-    }
-    
-    // Parser standard pour story bibles et notes génériques
-    const updates = {
-      script_updates: [],
-      character_updates: [],
-      place_updates: [],
-      system_updates: [],
-      timeline_updates: [],
-      todos: []
-    };
-    
-    const lines = notes.split('\n');
-    let currentSection = null;
-    
-    lines.forEach((line, lineIdx) => {
-      const trimmed = line.trim();
-      if (!trimmed) return;
-      
-      // Détecter les sections markdown
-      const sectionMatch = trimmed.match(/^#+\s*(\d+\.)?\s*(.+)/);
-      if (sectionMatch) {
-        currentSection = sectionMatch[2].trim();
-      }
-      
-      // Pattern 1: Pages de scénario (p45, page 45, p.45)
-      const pageMatch = trimmed.match(/^(?:p\.?|page\s*)(\d+)[:\s-]+(.+)/i);
-      if (pageMatch) {
-        const page = parseInt(pageMatch[1]);
-        let content = pageMatch[2];
-        let dialogue = null;
-        let character = null;
-        
-        // Extraire dialogue entre guillemets
-        const dialogueMatch = content.match(/"([^"]+)"/);
-        if (dialogueMatch) {
-          dialogue = dialogueMatch[1];
-        }
-        
-        // Détecter personnage (mot en majuscules au début)
-        const charMatch = content.match(/^([A-Z][A-Za-zÀ-ÿ]+)\s+/);
-        if (charMatch) {
-          character = charMatch[1];
-        }
-        
-        updates.script_updates.push({ page, action: content, dialogue, character });
-      }
-      
-      // Pattern 2: TODOs et points à traiter
-      // IMPORTANT: Ne PAS capturer les dialogues qui finissent par "?"
-      // Un vrai todo est explicitement marqué avec des tags spécifiques
-      const todoPatterns = [
-        /\[À\s*(définir|développer|traiter|faire|préciser)[^\]]*\]/gi,  // [À définir], [À développer ...]
-        /\bTODO:?\s*(.+)/i,                                             // TODO: quelque chose
-        /\bFIXME:?\s*(.+)/i,                                            // FIXME: quelque chose
-        /\bÀ\s*FAIRE:?\s*(.+)/i,                                        // À FAIRE: quelque chose
-        /\bÀ\s*TRAITER:?\s*(.+)/i,                                      // À TRAITER: quelque chose
-        /^\s*-\s*\[\s*\]\s*(.+)/                                        // - [ ] checkbox non cochée
-      ];
-      
-      todoPatterns.forEach(pattern => {
-        const match = trimmed.match(pattern);
-        if (match) {
-          // Extraire le contenu significatif
-          const content = match[1] || trimmed;
-          // Éviter les faux positifs très courts ou les simples "définir"
-          if (content && content.length > 3 && !/^(définir|traiter|faire)$/i.test(content)) {
-            updates.todos.push({
-              title: content.substring(0, 80),
-              context: currentSection || '',
-              section: currentSection,
-              line: lineIdx + 1
-            });
-          }
-        }
-      });
-      
-      // Pattern 3: Personnages - SEULEMENT avec des marqueurs explicites
-      // Éviter les faux positifs comme "Mars — Passé" ou "Présent"
-      const invalidNames = /^(mars|terre|earth|moon|lune|présent|passé|futur|avant|après|page|séquence|chapitre|arc|acte|scène)/i;
-      
-      const charMatch = trimmed.match(/^(?:personnage|character):?\s*(.+)/i);
-      if (charMatch && !invalidNames.test(charMatch[1])) {
-        updates.character_updates.push({
-          name: charMatch[1].trim(),
-          trait: ''
-        });
-      }
-      
-      // Pattern 4: Lieux
-      const placeMatch = trimmed.match(/^(?:lieu|place|endroit):?\s*(.+)/i);
-      if (placeMatch) {
-        const parts = placeMatch[1].split(/[—–-]/);
-        updates.place_updates.push({
-          name: parts[0].trim(),
-          description: parts[1] ? parts[1].trim() : ''
-        });
-      }
-      
-      // Pattern 5: Timeline (dates, périodes)
-      const timelineMatch = trimmed.match(/^(?:il y a|avant|après|passé|présent|futur|\d+\s*(?:ans?|années?))/i);
-      if (timelineMatch) {
-        updates.timeline_updates.push({
-          period: trimmed.split(/[:\-–—]/)[0].trim(),
-          event: trimmed
-        });
-      }
-    });
-    
-    return updates;
-  }
-  
   // Fusionner les résultats locaux et IA
   mergeUpdates(local, ai) {
     const merged = {
@@ -2884,460 +1192,128 @@ RÈGLES:
       return false;
     }
 
-    const project = this.currentProject;
-    let result;
-    try {
-      result = await window.api.writeFile(
-        `${project.path}/_PROJECT.json`,
-        JSON.stringify(this.projectData, null, 2)
-      );
-    } catch (error) {
-      result = { success: false, error: error.message };
-    }
+    this.pendingProject = { project: this.currentProject, data: this.projectData };
+    return this.flushProject();
+  }
 
-    if (!result.success) {
-      this.setSaveState('error', result.error);
-      this.addChatMessage(`❌ Projet « ${project.name} » non enregistré : ${result.error}`, 'assistant');
+  // Modification venant des vues : écriture groupée après une courte pause
+  scheduleProjectSave(delay = 800) {
+    this.pendingProject = { project: this.currentProject, data: this.projectData };
+    this.setSaveState('dirty');
+    clearTimeout(this.projectSaveTimer);
+    this.projectSaveTimer = setTimeout(() => this.flushProject(), delay);
+  }
+
+  // Écrit _PROJECT.json en attente dans son projet d'origine (même si l'utilisateur en a changé).
+  // Écritures enchaînées : une version ancienne n'écrase jamais une plus récente.
+  flushProject() {
+    clearTimeout(this.projectSaveTimer);
+    const pending = this.pendingProject;
+    if (!pending) return this.projectWriteChain || Promise.resolve(true);
+    this.pendingProject = null;
+
+    const write = async () => {
+      const isCurrent = () => this.currentProject?.path === pending.project.path;
+      if (isCurrent()) this.setSaveState('saving');
+      let result;
+      try {
+        result = await window.api.writeFile(`${pending.project.path}/_PROJECT.json`, JSON.stringify(pending.data, null, 2));
+      } catch (error) {
+        result = { success: false, error: error.message };
+      }
+      if (!result.success) {
+        if (!this.pendingProject && isCurrent()) this.pendingProject = pending;
+        if (isCurrent()) this.setSaveState('error', result.error);
+        this.addChatMessage(`Projet « ${pending.project.name} » non enregistré : ${result.error}`, 'error');
+        return false;
+      }
+      if (isCurrent() && !this.pendingNotes && !this.pendingProject) this.setSaveState('saved');
+      return true;
+    };
+
+    this.projectWriteChain = (this.projectWriteChain || Promise.resolve(true)).then(write, write);
+    return this.projectWriteChain;
+  }
+
+  // Raison pour laquelle les données structurées ne sont pas modifiables (null si elles le sont)
+  readOnlyReason() {
+    if (!this.currentProject) return 'Aucun projet ouvert.';
+    if (this.projectLoadError) return this.projectLoadError;
+    if (this.pendingMigration) return 'Projet à l\'ancien format : la structure et la Bible sont en lecture seule tant que la mise à jour du format n\'est pas validée.';
+    return null;
+  }
+
+  // Applique une modification venant d'une vue : `mutator` reçoit le projet et renvoie sa nouvelle
+  // version (ou null pour ne rien changer). Refusée si le projet est illisible ou à migrer.
+  async mutateProject(mutator, { delay = 800 } = {}) {
+    if (this.pendingMigration && !(await this.ensureMigrated())) return false;
+    const reason = this.readOnlyReason();
+    if (reason) {
+      this.addChatMessage(reason, 'error');
       return false;
     }
-    if (!this.pendingNotes) this.setSaveState('saved');
+    const next = mutator(this.projectData);
+    if (!next || next === this.projectData) return false;
+    this.projectData = next;
+    this.scheduleProjectSave(delay);
+    this.populateTodos();
+    this.updatePosition();
+    this.partner.refreshContext();
     return true;
   }
 
-  // === UI Population ===
-  populateAllPanels() {
-    this.updateTabCounts();
-    this.populateCharacters();
-    this.populatePlaces();
-    this.populateSystems();
-    this.populateTimeline();
-    this.populateTodos();
-    this.populateRefs();
-  }
-  
-  updateTabCounts() {
-    document.getElementById('countCharacters').textContent = this.projectData.characters?.length || 0;
-    document.getElementById('countPlaces').textContent = this.projectData.places?.length || 0;
-    document.getElementById('countSystems').textContent = this.projectData.systems?.length || 0;
-    document.getElementById('countTimeline').textContent = this.projectData.timeline?.length || 0;
-    document.getElementById('countRefs').textContent = this.projectData.refs?.length || 0;
-    document.getElementById('countTodos').textContent = this.projectData.todos?.length || 0;
-  }
-  
-  populateCharacters() {
-    const container = document.getElementById('characterList');
-    const chars = this.projectData.characters || [];
-    
-    if (chars.length === 0) {
-      container.innerHTML = '<p class="empty-state">Aucun personnage</p>';
-      return;
-    }
-    
-    container.innerHTML = chars.map(c => {
-      // Construire la fiche complète
-      const traits = c.traits?.length ? `<div class="char-traits">${c.traits.map(t => `<span class="char-trait">${t}</span>`).join('')}</div>` : '';
-      
-      const strengths = c.strengths?.length ? `
-        <div class="char-section">
-          <div class="char-section-title">💪 Forces</div>
-          <ul class="char-list">${c.strengths.map(s => `<li>${s}</li>`).join('')}</ul>
-        </div>` : '';
-      
-      const weaknesses = c.weaknesses?.length ? `
-        <div class="char-section">
-          <div class="char-section-title">⚠️ Faiblesses</div>
-          <ul class="char-list">${c.weaknesses.map(w => `<li>${w}</li>`).join('')}</ul>
-        </div>` : '';
-      
-      const goals = c.goals?.length ? `
-        <div class="char-section">
-          <div class="char-section-title">🎯 Objectifs</div>
-          <ul class="char-list">${c.goals.map(g => `<li>${g}</li>`).join('')}</ul>
-        </div>` : '';
-      
-      const motivations = c.motivations?.length ? `
-        <div class="char-section">
-          <div class="char-section-title">❤️ Motivations</div>
-          <ul class="char-list">${c.motivations.map(m => `<li>${m}</li>`).join('')}</ul>
-        </div>` : '';
-      
-      const relationships = c.relationships?.length ? `
-        <div class="char-section">
-          <div class="char-section-title">🤝 Relations</div>
-          <ul class="char-list">${c.relationships.map(r => `<li><strong>${r.character}</strong>: ${r.type}</li>`).join('')}</ul>
-        </div>` : '';
-      
-      const arc = c.arc ? `
-        <div class="char-section">
-          <div class="char-section-title">📈 Arc</div>
-          <div class="char-arc">${c.arc}</div>
-        </div>` : '';
-      
-      const quotes = c.keyQuotes?.length ? `
-        <div class="char-section">
-          <div class="char-section-title">💬 Citations clés</div>
-          ${c.keyQuotes.map(q => `<blockquote class="char-quote">"${q.text}" <span class="quote-page">(p.${q.page})</span></blockquote>`).join('')}
-        </div>` : '';
-      
-      return `
-        <div class="character-card" data-name="${c.name}">
-          <div class="char-header">
-            <div class="char-name">${c.name}</div>
-            ${c.role ? `<div class="char-role ${c.role.toLowerCase().replace(/[^a-z]/g, '')}">${c.role}</div>`
-              : c.suggestedRole ? `<div class="char-role suggestion-tag" title="${this.escapeHtml(`Suggestion (${c.suggestionSource || 'extraction'}) — à confirmer`)}">${this.escapeHtml(c.suggestedRole)} ?</div>` : ''}
-          </div>
-          ${c.type ? `<div class="char-type">${c.type}</div>` : ''}
-          ${c.description ? `<div class="char-description">${c.description}</div>` : ''}
-          ${traits}
-          <div class="char-details">
-            ${strengths}
-            ${weaknesses}
-            ${goals}
-            ${motivations}
-            ${relationships}
-            ${arc}
-            ${quotes}
-          </div>
-          <div class="char-meta">
-            <span>Apparaît page ${c.firstAppearance || '?'}</span>
-            ${c.dialogueCount ? `<span>${c.dialogueCount} répliques</span>` : ''}
-          </div>
-        </div>
-      `;
-    }).join('');
-  }
-  
-  populatePlaces() {
-    const container = document.getElementById('placesList');
-    const places = this.projectData.places || [];
-    
-    if (places.length === 0) {
-      container.innerHTML = '<p class="empty-state">Aucun lieu</p>';
-      return;
-    }
-    
-    container.innerHTML = places.map(p => {
-      // Atmosphère badges
-      const atmosphereBadges = (p.atmosphere || []).map(a => 
-        `<span class="place-badge atmosphere-${a.toLowerCase()}">${a}</span>`
-      ).join('');
-      
-      // Personnes qui fréquentent ce lieu
-      const frequentedBy = (p.frequentedBy || []).slice(0, 5).map(name =>
-        `<span class="person-tag">${name}</span>`
-      ).join('');
-      
-      // Signification narrative
-      const significance = (p.significance || []).map(s =>
-        `<li>${s}</li>`
-      ).join('');
-      
-      // Connexions au monde
-      const worldConnections = (p.worldConnection || []).map(c =>
-        `<div class="world-connection">
-          <span class="connection-aspect">${c.aspect}</span>
-          <span class="connection-detail">${c.connection}</span>
-          <span class="connection-implication">${c.implication}</span>
-        </div>`
-      ).join('');
-      
-      return `
-        <div class="place-card">
-          <div class="place-card-header">
-            <h3 class="place-name">${p.name}</h3>
-            ${p.access ? `<span class="access-badge access-${p.access.toLowerCase()}">${p.access}</span>` : ''}
-          </div>
-          
-          ${atmosphereBadges ? `<div class="place-atmosphere">${atmosphereBadges}</div>` : ''}
-          
-          ${p.description ? `<p class="place-description">${p.description}</p>` : ''}
-          
-          ${frequentedBy ? `
-            <div class="place-section">
-              <h4>Personnages présents</h4>
-              <div class="frequented-by">${frequentedBy}</div>
-            </div>
-          ` : ''}
-          
-          ${significance ? `
-            <div class="place-section">
-              <h4>Rôle narratif</h4>
-              <ul class="significance-list">${significance}</ul>
-            </div>
-          ` : ''}
-          
-          ${worldConnections ? `
-            <div class="place-section">
-              <h4>Connexions au monde</h4>
-              ${worldConnections}
-            </div>
-          ` : ''}
-          
-          <div class="place-meta">
-            ${p.firstMention ? `<span>Première apparition: p.${p.firstMention}</span>` : ''}
-            ${p.sceneCount ? `<span>${p.sceneCount} scène(s)</span>` : ''}
-          </div>
-        </div>
-      `;
-    }).join('');
-  }
-  
-  populateSystems() {
-    const container = document.getElementById('systemsList');
-    const systems = this.projectData.systems || [];
-    
-    if (systems.length === 0) {
-      container.innerHTML = '<p class="empty-state">Aucun système</p>';
-      return;
-    }
-    
-    container.innerHTML = systems.map(s => {
-      // Détails spécifiques selon la catégorie
-      let detailsHtml = '';
-      
-      if (s.details) {
-        // Système politique
-        if (s.category === 'Politique') {
-          if (s.details.leader) {
-            detailsHtml += `
-              <div class="system-detail">
-                <h5>Leader</h5>
-                <p><strong>${s.details.leader.title}</strong>: ${s.details.leader.description || ''}</p>
-              </div>
-            `;
-          }
-          if (s.details.hierarchy?.length > 0) {
-            detailsHtml += `
-              <div class="system-detail">
-                <h5>Hiérarchie</h5>
-                <div class="hierarchy-tags">${s.details.hierarchy.map(h => `<span class="hierarchy-tag">${h}</span>`).join('')}</div>
-              </div>
-            `;
-          }
-          if (s.details.propaganda?.length > 0) {
-            detailsHtml += `
-              <div class="system-detail">
-                <h5>Propagande</h5>
-                <ul>${s.details.propaganda.map(p => `<li>🎭 ${p}</li>`).join('')}</ul>
-              </div>
-            `;
-          }
-          if (s.details.control?.length > 0) {
-            detailsHtml += `
-              <div class="system-detail">
-                <h5>Mécanismes de contrôle</h5>
-                <ul>${s.details.control.map(c => `<li>⚠️ ${c}</li>`).join('')}</ul>
-              </div>
-            `;
-          }
-        }
-        
-        // Système de ressources
-        if (s.category === 'Ressources') {
-          if (s.details.scarce?.length > 0) {
-            detailsHtml += `
-              <div class="system-detail">
-                <h5>Ressources rares</h5>
-                ${s.details.scarce.map(r => `
-                  <div class="scarce-resource">
-                    <strong>${r.item}</strong>
-                    <p class="resource-evidence">${r.evidence}</p>
-                    <p class="resource-implication">→ ${r.implication}</p>
-                  </div>
-                `).join('')}
-              </div>
-            `;
-          }
-          if (s.details.implications?.length > 0) {
-            detailsHtml += `
-              <div class="system-detail">
-                <h5>Implications</h5>
-                <ul>${s.details.implications.map(i => `<li>💡 ${i}</li>`).join('')}</ul>
-              </div>
-            `;
-          }
-        }
-        
-        // Structure sociale
-        if (s.category === 'Société') {
-          if (s.details.groups?.length > 0) {
-            detailsHtml += `
-              <div class="system-detail">
-                <h5>Groupes sociaux</h5>
-                ${s.details.groups.map(g => `
-                  <div class="social-group">
-                    <strong>${g.name}</strong>
-                    <p>${g.description}</p>
-                  </div>
-                `).join('')}
-              </div>
-            `;
-          }
-          if (s.details.dynamics?.length > 0) {
-            detailsHtml += `
-              <div class="system-detail">
-                <h5>Dynamiques</h5>
-                <ul>${s.details.dynamics.map(d => `<li>🔄 ${d}</li>`).join('')}</ul>
-              </div>
-            `;
-          }
-        }
-      }
-      
-      return `
-        <div class="system-card system-${(s.category || '').toLowerCase()}">
-          <div class="system-card-header">
-            <span class="system-category">${s.category || 'Système'}</span>
-            <h3 class="system-name">${s.name}</h3>
-          </div>
-          
-          <p class="system-description">${s.description || ''}</p>
-          
-          ${detailsHtml}
-        </div>
-      `;
-    }).join('');
-    
-    // Ajouter la section des indices narratifs après les systèmes
-    this.populateNarrativeClues();
-  }
-  
-  populateNarrativeClues() {
-    const clues = this.projectData.narrativeClues || [];
-    if (clues.length === 0) return;
-    
-    // Créer ou récupérer le conteneur des indices
-    let cluesContainer = document.getElementById('narrativeClues');
-    if (!cluesContainer) {
-      // Ajouter après systemsList
-      const systemsList = document.getElementById('systemsList');
-      if (systemsList) {
-        const cluesSection = document.createElement('div');
-        cluesSection.id = 'narrativeClues';
-        cluesSection.className = 'narrative-clues-section';
-        cluesSection.innerHTML = '<h3 class="section-title">💡 Indices Narratifs</h3><div class="clues-list"></div>';
-        systemsList.after(cluesSection);
-        cluesContainer = cluesSection;
-      } else {
-        return;
-      }
-    }
-    
-    const cluesList = cluesContainer.querySelector('.clues-list') || cluesContainer;
-    cluesList.innerHTML = clues.map(clue => {
-      // Normaliser le type pour la classe CSS (retirer accents et caractères spéciaux)
-      const normalizedType = clue.type.toLowerCase()
-        .replace(/[éèêë]/g, 'e')
-        .replace(/[àâä]/g, 'a')
-        .replace(/[îï]/g, 'i')
-        .replace(/[ôö]/g, 'o')
-        .replace(/[ùûü]/g, 'u')
-        .replace(/[']/g, '')
-        .replace(/\s+/g, '-')
-        .replace(/[^a-z0-9-]/g, '');
-      
-      return `
-        <div class="narrative-clue clue-type-${normalizedType}">
-          <div class="clue-header">
-            <span class="clue-type">${clue.type}</span>
-          </div>
-          <p class="clue-observation">"${clue.observation}"</p>
-          <div class="clue-insights">
-            ${clue.implication ? `<p class="clue-implication">📌 ${clue.implication}</p>` : ''}
-            ${clue.characterInsight ? `<p class="clue-character">👤 ${clue.characterInsight}</p>` : ''}
-            ${clue.worldInsight ? `<p class="clue-world">🌍 ${clue.worldInsight}</p>` : ''}
-          </div>
-        </div>
-      `;
-    }).join('');
-  }
-  
-  populateTimeline() {
-    const container = document.getElementById('timelineList');
-    const events = this.projectData.timeline || [];
-    
-    if (events.length === 0) {
-      container.innerHTML = '<p class="empty-state">Aucun événement</p>';
-      return;
-    }
-    
-    container.innerHTML = events.map(e => `
-      <div class="timeline-item">
-        <div class="timeline-item-period">${e.period}</div>
-        <div class="timeline-item-event">${e.event}</div>
-      </div>
-    `).join('');
-  }
-  
+  // Points à traiter, dans la navigation ; les doublons possibles sont signalés, jamais fusionnés
   populateTodos() {
     const container = document.getElementById('todosList');
     const todos = this.projectData.todos || [];
-    
+    const open = todos.filter(t => !t || typeof t !== 'object' || !t.resolved).length;
+    document.getElementById('countTodos').textContent = open;
+
     if (todos.length === 0) {
-      container.innerHTML = '<p class="empty-state">Aucun point en suspens 🎉</p>';
+      container.innerHTML = '<p class="empty-state">Aucun point en suspens.</p>';
       return;
     }
-    
-    // Doublons possibles : signalés, jamais supprimés ni fusionnés automatiquement
+
+    const esc = (v) => this.escapeHtml(String(v ?? ''));
+    const icon = (name) => window.Icons.svg(name, { size: 14 });
+    const readOnly = !!this.readOnlyReason();
     const dupGroups = window.ProjectSchema.findDuplicateCandidates({ todos }).todos;
     const dupOf = new Map();
     dupGroups.forEach(g => g.items.forEach((item, rank) => dupOf.set(item.index, { rank: rank + 1, total: g.items.length })));
     const dupNotice = dupGroups.length
-      ? `<p class="empty-state">${window.ProjectSchema.extraCount(dupGroups)} doublon(s) possible(s) sur ${dupGroups.length} titre(s), conservés : supprimez vous-même ceux qui sont en trop.</p>`
+      ? `<p class="todo-notice">${window.ProjectSchema.extraCount(dupGroups)} doublon(s) possible(s) sur ${dupGroups.length} titre(s), conservés : supprimez vous-même ceux qui sont en trop.</p>`
       : '';
 
-    container.innerHTML = dupNotice + todos.map((t, i) => `
-      <div class="todo-card clickable" data-index="${i}">
-        <div class="todo-card-header">
-          <span class="todo-card-title">🔴 ${this.escapeHtml(t.title)}${dupOf.has(i) ? `<span class="dup-tag">doublon possible ${dupOf.get(i).rank}/${dupOf.get(i).total}</span>` : ''}</span>
-          ${t.pageRef ? `<span class="todo-page-ref">p.${t.pageRef}</span>` : ''}
-          ${t.resolved ? '<span class="todo-resolved">✓</span>' : ''}
-        </div>
-        <div class="todo-card-context">${this.escapeHtml(t.context || '')}</div>
+    container.innerHTML = dupNotice + todos.map((t, i) => {
+      if (!t || typeof t !== 'object') return `<div class="todo-card loose" title="Entrée non structurée, conservée telle quelle">${esc(t)}</div>`;
+      return `
+      <div class="todo-card${t.resolved ? ' resolved' : ''}" data-index="${i}">
+        <div class="todo-card-title">${esc(t.title)}${t.pageRef ? ` <span class="todo-page-ref">p. ${esc(t.pageRef)}</span>` : ''}${dupOf.has(i) ? ` <span class="dup-tag">doublon possible ${dupOf.get(i).rank}/${dupOf.get(i).total}</span>` : ''}</div>
+        ${t.context ? `<div class="todo-card-context">${esc(t.context)}</div>` : ''}
         <div class="todo-card-actions">
-          <button class="btn-todo-action btn-goto" data-action="goto" data-index="${i}" title="Voir dans le scénario">📍 Localiser</button>
-          <button class="btn-todo-action btn-resolve" data-action="resolve" data-index="${i}" title="Marquer comme résolu">✓</button>
-          <button class="btn-todo-action btn-delete" data-action="delete" data-index="${i}" title="Supprimer">✕</button>
+          <button class="btn-todo-action" data-action="goto" data-index="${i}" title="Retrouver dans le texte" aria-label="Retrouver « ${esc(t.title)} » dans le texte">${icon('search')}</button>
+          ${t.resolved ? '<span class="todo-resolved">Résolu</span>' : `<button class="btn-todo-action" data-action="resolve" data-index="${i}" title="Marquer comme résolu" aria-label="Marquer « ${esc(t.title)} » comme résolu"${readOnly ? ' disabled' : ''}>${icon('check')}</button>`}
+          <button class="btn-todo-action" data-action="delete" data-index="${i}" title="Supprimer" aria-label="Supprimer « ${esc(t.title)} »"${readOnly ? ' disabled' : ''}>${icon('trash')}</button>
         </div>
-      </div>
-    `).join('');
-    
-    // Ajouter les event listeners
+      </div>`;
+    }).join('');
+
     container.querySelectorAll('.btn-todo-action').forEach(btn => {
-      btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const action = btn.dataset.action;
-        const index = parseInt(btn.dataset.index);
-        
-        switch (action) {
-          case 'goto':
-            this.navigateToTodo(index);
-            break;
-          case 'resolve':
-            this.resolveTodo(index);
-            break;
-          case 'delete':
-            this.deleteTodo(index);
-            break;
-        }
-      });
-    });
-    
-    // Clic sur la carte entière = goto
-    container.querySelectorAll('.todo-card').forEach(card => {
-      card.addEventListener('click', () => {
-        this.navigateToTodo(parseInt(card.dataset.index));
+      btn.addEventListener('click', () => {
+        const index = parseInt(btn.dataset.index, 10);
+        if (btn.dataset.action === 'goto') this.navigateToTodo(index);
+        if (btn.dataset.action === 'resolve') this.resolveTodo(index);
+        if (btn.dataset.action === 'delete') this.deleteTodo(index);
       });
     });
   }
-  
+
   async resolveTodo(index) {
     if (!(await this.ensureMigrated())) return;
     if (this.projectData.todos[index]) {
       this.projectData.todos[index].resolved = true;
       await this.saveProject();
       this.populateTodos();
-      this.updateTabCounts();
     }
   }
   
@@ -3346,28 +1322,8 @@ RÈGLES:
     if (confirm('Supprimer ce point à traiter ?')) {
       this.projectData.todos.splice(index, 1);
       await this.saveProject();
-      this.populateTodos();
-      this.renderScript();
-      this.updateTabCounts();
+      this.refreshViews();
     }
-  }
-  
-  populateRefs() {
-    const container = document.getElementById('refsList');
-    const refs = this.projectData.refs || [];
-    
-    if (refs.length === 0) {
-      container.innerHTML = '<p class="empty-state">Aucune référence</p>';
-      return;
-    }
-    
-    container.innerHTML = refs.map(r => `
-      <div class="ref-card">
-        <div class="ref-card-title">${r.title}</div>
-        <div class="ref-card-source">${r.source || ''}</div>
-        <div class="ref-card-content">${r.content || ''}</div>
-      </div>
-    `).join('');
   }
   
   renderScript() {
@@ -3394,23 +1350,15 @@ RÈGLES:
     const hasData = synopsis || script.length || arcs.length || todos.length;
     
     if (!hasData) {
-      container.innerHTML = `
-        <div class="scenario-empty">
-          <div class="empty-icon">📜</div>
-          <h2>Scénario vide</h2>
-          <p>Importe une Story Bible ou synchronise tes notes pour commencer.</p>
-          <div class="empty-actions">
-            <button class="btn-action" onclick="document.getElementById('btnImport').click()">
-              📥 Importer Story Bible
-            </button>
-            <button class="btn-action secondary" onclick="document.getElementById('btnSync').click()">
-              🔄 Synchroniser
-            </button>
-          </div>
-        </div>
-      `;
+      container.innerHTML = this.currentProject
+        ? `<div class="scenario-empty">
+            <h2>Aperçu vide</h2>
+            <p>« Analyser les notes » construit cet aperçu à partir de _NOTES.md ; « Importer » lit une Story Bible. Rien n'est supprimé.</p>
+          </div>`
+        : '<p class="empty-state">Choisissez un projet.</p>';
       return;
     }
+    const esc = (v) => this.escapeHtml(String(v ?? ''));
     
     // === GÉNÉRATION DU DOCUMENT SCÉNARIO ===
     let html = `<article class="scenario-document ${isMangaScript ? 'manga-script' : ''}">`;
@@ -3418,12 +1366,12 @@ RÈGLES:
     // En-tête du projet
     html += `
       <header class="scenario-header">
-        <h1 class="scenario-title">${title}</h1>
+        <h1 class="scenario-title">${esc(title)}</h1>
         <div class="scenario-meta">
-          <span class="meta-item">📄 ${stats.pages} pages</span>
-          <span class="meta-item">👥 ${stats.characters} perso.</span>
-          ${sequences.length > 0 ? `<span class="meta-item">🎬 ${sequences.length} séq.</span>` : ''}
-          ${todos.length > 0 ? `<span class="meta-item meta-warning">🔴 ${todos.length} à traiter</span>` : ''}
+          <span class="meta-item">${stats.pages} pages</span>
+          <span class="meta-item">${stats.characters} personnages</span>
+          ${sequences.length > 0 ? `<span class="meta-item">${sequences.length} séquences</span>` : ''}
+          ${todos.length > 0 ? `<span class="meta-item meta-warning">${todos.length} à traiter</span>` : ''}
         </div>
       </header>
     `;
@@ -3434,7 +1382,7 @@ RÈGLES:
         <section class="scenario-synopsis">
           <h2>Synopsis</h2>
           <div class="synopsis-text">
-            ${synopsis.split('\n').filter(l => l.trim()).map(p => `<p>${p}</p>`).join('')}
+            ${String(synopsis).split('\n').filter(l => l.trim()).map(p => `<p>${esc(p)}</p>`).join('')}
           </div>
         </section>
       `;
@@ -3452,8 +1400,8 @@ RÈGLES:
                   <span class="arc-number">${i + 1}</span>
                 </div>
                 <div class="arc-content">
-                  <h3>${arc.name.replace(/^(🟢|🟡|🟠|🔴|⚫)\s*/, '').replace(/^ARC\s*\d+[:\s]*/i, '')}</h3>
-                  ${arc.description ? `<p>${arc.description}</p>` : '<p class="arc-empty">À développer...</p>'}
+                  <h3>${esc(String(arc.name || '').replace(/^(🟢|🟡|🟠|🔴|⚫)\s*/u, '').replace(/^ARC\s*\d+[:\s]*/i, ''))}</h3>
+                  ${arc.description ? `<p>${esc(arc.description)}</p>` : '<p class="arc-empty">À développer…</p>'}
                 </div>
               </div>
             `).join('')}
@@ -3605,10 +1553,10 @@ RÈGLES:
     if (todos.length > 0) {
       html += `
         <section class="scenario-todos">
-          <h2>🔴 Points à traiter <span class="todo-count">${todos.length}</span></h2>
+          <h2>Points à traiter <span class="todo-count">${todos.length}</span></h2>
           <ul class="todos-list-compact">
             ${todos.slice(0, 8).map(t => `
-              <li>${t.title}${t.context ? ` <span class="todo-ctx">(${t.context})</span>` : ''}</li>
+              <li>${esc(t?.title ?? t)}${t?.context ? ` <span class="todo-ctx">(${esc(t.context)})</span>` : ''}</li>
             `).join('')}
             ${todos.length > 8 ? `<li class="todos-more">+ ${todos.length - 8} autres...</li>` : ''}
           </ul>
@@ -3619,66 +1567,47 @@ RÈGLES:
     html += `</article>`;
     
     container.innerHTML = html;
-    this.currentMainView = 'scenario';
   }
   
   // Navigation vers un todo depuis l'onglet À traiter
+  // Retrouve un point à traiter : d'abord dans le document ouvert, sinon dans l'aperçu structuré
   navigateToTodo(todoIndex) {
     const todo = this.projectData.todos[todoIndex];
     if (!todo) return;
+    this.setWorkspace('write', { focus: false });
+
+    const editor = this.editor;
+    const needles = [todo.title, todo.context].filter(n => typeof n === 'string' && n.trim().length > 2);
+    for (const needle of needles) {
+      const at = editor.value.toLowerCase().indexOf(needle.trim().toLowerCase());
+      if (at >= 0) {
+        editor.focus();
+        editor.setSelectionRange(at, at + needle.trim().length);
+        const line = editor.value.slice(0, at).split('\n').length;
+        editor.scrollTop = Math.max(0, (line / editor.value.split('\n').length) * editor.scrollHeight - editor.clientHeight / 3);
+        this.onCursorMove();
+        return;
+      }
+    }
+
     if (this.editorMode === 'notes') this.setEditorMode('split');
-    
-    // Basculer vers l'onglet scénario
-    document.querySelectorAll('.project-tab').forEach(t => t.classList.remove('active'));
-    document.querySelector('[data-tab="scenario"]').classList.add('active');
-    document.querySelectorAll('.project-panel').forEach(p => p.classList.remove('active'));
-    document.getElementById('panel-scenario').classList.add('active');
-    
-    // Trouver l'élément à mettre en surbrillance
     const scriptContent = document.getElementById('scriptContent');
-    let targetElement = null;
-    
-    // Chercher par page référencée
-    if (todo.pageRef || todo.section) {
-      targetElement = scriptContent.querySelector(`[data-page="${todo.pageRef || todo.section}"]`);
+    let target = null;
+    const ref = todo.pageRef || todo.section;
+    if (ref) target = scriptContent.querySelector(`[data-page="${CSS.escape(String(ref))}"]`);
+    if (!target && todo.context) {
+      const terms = todo.context.toLowerCase().split(' ').filter(w => w.length > 3);
+      target = [...scriptContent.querySelectorAll('.script-page')].find(page => terms.some(term => page.textContent.toLowerCase().includes(term))) || null;
     }
-    
-    // Si pas trouvé, chercher par contexte dans le contenu
-    if (!targetElement && todo.context) {
-      const allPages = scriptContent.querySelectorAll('.script-page');
-      const searchTerms = todo.context.toLowerCase().split(' ').filter(w => w.length > 3);
-      
-      allPages.forEach(page => {
-        const pageText = page.textContent.toLowerCase();
-        if (searchTerms.some(term => pageText.includes(term))) {
-          targetElement = page;
-        }
-      });
-    }
-    
-    // Si trouvé, scroller et mettre en surbrillance
-    if (targetElement) {
-      targetElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      targetElement.classList.add('highlight-search');
-      setTimeout(() => targetElement.classList.remove('highlight-search'), 3000);
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target.classList.add('highlight-search');
+      setTimeout(() => target.classList.remove('highlight-search'), 3000);
     } else {
-      // Sinon, afficher un tooltip avec le contexte du todo
-      this.showTodoContextPopup(todo);
+      this.addChatMessage(`« ${todo.title} » n'a pas été retrouvé dans « ${this.currentDoc?.name || 'le document'} » ni dans l'aperçu.${todo.context ? ` Contexte : ${todo.context}` : ''}`, 'info');
     }
   }
-  
-  showTodoContextPopup(todo) {
-    const popup = document.createElement('div');
-    popup.className = 'todo-context-popup';
-    popup.innerHTML = `
-      <div class="popup-header">🔴 ${todo.title}</div>
-      <div class="popup-context">${todo.context || 'Aucun contexte spécifique'}</div>
-      <div class="popup-hint">Ce point n'est pas encore lié à une section du scénario</div>
-    `;
-    document.body.appendChild(popup);
-    setTimeout(() => popup.remove(), 4000);
-  }
-  
+
   // === Agent Events ===
   // Texte de _NOTES.md (source de l'analyse), qu'il soit ouvert ou non
   async readNotesText() {
@@ -3713,6 +1642,7 @@ RÈGLES:
     const container = document.getElementById('chatMessages');
     const div = document.createElement('div');
     const kind = role === 'error' || /^❌/.test(content) ? 'error' : role === 'user' ? 'action' : 'info';
+    content = String(content).replace(/^[\p{Extended_Pictographic}ℹ️\s]+/u, '');
     div.className = `chat-notice ${kind}`;
     div.setAttribute('role', kind === 'error' ? 'alert' : 'status');
     const time = new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
@@ -3871,6 +1801,13 @@ RÈGLES:
     };
   }
 }
+
+// Méthodes définies dans des fichiers séparés (chargés avant app.js)
+[window.StoryBibleImport, window.MangaAnalysis].forEach(Mixin => {
+  Object.getOwnPropertyNames(Mixin.prototype).filter(name => name !== 'constructor').forEach(name => {
+    Object.defineProperty(WritingPartnerApp.prototype, name, Object.getOwnPropertyDescriptor(Mixin.prototype, name));
+  });
+});
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
