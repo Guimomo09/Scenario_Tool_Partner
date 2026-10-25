@@ -139,7 +139,104 @@ Les projets réels sont encore au format v1 : la migration est proposée à leur
   données (`%APPDATA%\Partner`), rendant la clé enregistrée indéchiffrable (« Aucune clé OpenAI enregistrée »).
   Dossier fixé à `%APPDATA%\writing-partner` ; une clé illisible est désormais signalée comme telle.
 
+- Compréhension narrative — incrément 1 (2026-10-26, prompt « compréhension narrative, critique et bible riche ») :
+  constats de l'audit double-check vérifiés dans le code : contamination (`manga-analysis.js`), perte des corrections IA
+  (`mergeUpdates`/`dedupeByKey`), catégories perdues, erreurs anciennes bloquées (`mergeFields`), lieux jamais détectés
+  (`page.location` absent, objets concaténés) : **tous confirmés, corrigés**.
+  - `core/provenance.js` : provenance par champ interprétatif (`_prov` : origine auteur/parseur/ia/import, statut
+    à vérifier/accepté/rejeté/obsolète, source document/page/ligne/extrait). Champ ancien sans provenance =
+    « provenance non renseignée · à vérifier » (ni validé, ni faux). Collection `reviews` (id `rv_`, liste absente = vide).
+  - Fusion : un champ vide est complété (à vérifier) ; une valeur différente ou un élément de liste nouveau devient une
+    proposition « À examiner », jamais un remplacement ni un cumul. Proposition tranchée jamais recréée ; accepter un
+    remplacement écarte l'ancienne valeur ; « Retirer » mémorise la valeur rejetée (pas réintroduite) ; une proposition
+    dont la valeur a changé devient obsolète. Une extraction ne peut pas se déclarer saisie de l'auteur (`origin`/`_prov` ignorés).
+  - `ProjectModel.combineExtractions` remplace `mergeUpdates` : local et IA gardent leur origine, toutes les catégories
+    (séquences, contexte, indices) passent ; une page résumée par l'IA ne remplace pas le texte du parseur.
+  - Analyse locale : plus aucun trait/force/objectif/motivation/relation/arc/description/type déduit de mots, plus de
+    fiches « Systèmes » créées par mots-clés, plus de règle sur un nom propre (`keyn`). Observations sourcées seulement :
+    répliques, pensées, pages de présence (réplique ou nom dans une action), extraits avec page/ligne, « sur les mêmes pages
+    (pas une relation) ». Personnages de la bible muets retrouvés par leur nom ; alias confirmé d'une seule fiche →
+    cette fiche, alias ambigu → séparé et signalé. Lieux de la bible : phrases d'action qui les nomment, atmosphère lue
+    dans ces phrases seulement, avec extrait. Chronologie : seulement une durée explicite, avec son extrait.
+  - Bible : champ « Alias confirmés » (personnages) / « Autres noms » (lieux) ; saisie dans le formulaire = auteur/accepté ;
+    sous chaque champ non validé, une ligne discrète (origine · statut · source) avec Valider / Retirer ; bloc « À examiner »
+    (Remplacer/Ajouter, Rejeter) ; filtre « À examiner (N) » ; tout est annulable (Ctrl+Z).
+  - Contexte du partenaire : chaque champ porte son statut (« IA · à vérifier — lecture non validée par l'auteur ») et sa
+    source ; observations marquées comme telles ; fiches retrouvées aussi par alias.
+  - 128 tests (+17 `test/understanding.test.js` : cas 1, 2, 3 partiel, 5, 6, 8, 9 du prompt + fusion/révision).
+    Contrôle lecture seule sur L'ABRI `_NOTES.md` : 60 pages, 6 séquences, 7 locuteurs, 0 interprétation, 0 système.
+    Rendu de la fiche contrôlé hors app (DOM simulé). Application non relancée, parcours UI non testés à la main.
+
+- Compréhension narrative — incrément 2 (2026-10-26) : sources, unités, couverture, affirmations.
+  - `core/claims.js` : affirmation = sujet (personnage/lieu/groupe/objet/système/relation/scène/récit, + second personnage
+    pour une relation), nature (événement montré / parole rapportée / croyance / interprétation / intention d'auteur /
+    proposition), aspect (objectif, peur, connaissance, opposition, cause, révélation, question…), statut, origine,
+    source (document, version, unité, lignes, extrait), point du récit, justification, lecture concurrente.
+    Citation obligatoire et retrouvée dans le texte réel (sinon écartée) ; une réplique ou une pensée citée comme
+    « événement montré » est requalifiée en parole/croyance ; parole attribuée au mauvais locuteur refusée ;
+    intention d'auteur venant de l'IA refusée. Rejetée = jamais recréée ; correction = ancienne rejetée + saisie auteur.
+  - `core/understanding.js` + mémoire `Projets/<Nom>/_COMPREHENSION.json` (illisible → jamais réécrite) :
+    sources du projet (sous-dossiers sur 2 niveaux) avec rôle choisi (fait autorité / brouillon / référence / non retenu ;
+    par défaut seul `_NOTES.md` est retenu), version (empreinte), doublons exacts (lus une fois) et versions candidates
+    (≥ 50 % de lignes communes ; deux autorités proches = lecture bloquée). Découpage complet : script = une unité par
+    séquence (coupée aux pages au-delà de 9 000 car.), autre texte = sections `#`/`##` regroupées ; chaque ligne non vide
+    dans une seule unité (contrôlé), préambule gardé, pages absentes signalées. Couverture par unité et document,
+    « partielle » tant que tout n'est pas lu ; reprise = unités non lues / en échec / modifiées seulement ; cache par
+    texte + traitement + modèle ; texte modifié → lectures non tranchées obsolètes, validées gardées mais signalées ;
+    réponse arrivée après une modification ignorée. Consolidation : alias confirmé → fiche, alias ambigu → question.
+  - Espace **Lecture** (4ᵉ onglet, Ctrl+Maj+4, `components/understanding-view.js`) : sources et rôles, « Lire le projet »
+    (confirmation avec nombre d'unités et de caractères, une unité par appel, annulable), couverture et unités
+    (écartées / requalifiées consultables), « Voici ce que je comprends de ton histoire » (personnages centraux et ce
+    qu'ils veulent, oppositions, causes et révélations, événements montrés, zones non résolues, questions décisives)
+    construit uniquement depuis les lectures sourcées, et liste des lectures à Valider / Rejeter / Corriger / remettre
+    à vérifier, avec lien vers la ligne du document.
+  - « Analyser les notes » : fin du préfixe de 8 000 caractères, l'IA lit tout `_NOTES.md` partie par partie ; une partie
+    en échec = rien de l'IA appliqué (parties lues gardées en mémoire de session pour la relance).
+  - 145 tests (+17 `test/comprehension.test.js` : cas 3, 4, 5, 6, 7, 8 du prompt). Banc Electron sur API simulée
+    (projet fictif en mémoire, IA simulée, aucun fichier réel) : 18 contrôles OK, 0 erreur console, captures 1000 / 1400 px,
+    clair et sombre. Découpage contrôlé en lecture seule sur les `_NOTES.md` réels (couverture complète, rien écrit).
+    Aucun appel IA réel : la qualité de lecture d'un vrai modèle n'est pas évaluée.
+
+- Compréhension narrative — incrément 3 (2026-10-26) : mémoire narrative → partenaire, fiches, intentions, critique.
+  - `core/recall.js` : à chaque demande, retrouve les personnages/lieux en jeu (nom, alias confirmé, fiches liées à la
+    scène active même non nommées), leurs lectures (validées d'abord, « à vérifier » marquées, rejetées/obsolètes jamais
+    envoyées, source citée), les **connaissances au point du récit** (unité du curseur : ce que chaque personnage sait/croit,
+    ce qu'il NE SAIT PAS ENCORE, ce que le lecteur a appris, ce qui est révélé plus tard), l'évolution des relations dans
+    l'ordre du récit (« une étape nouvelle n'est pas une incohérence »), et les **unités pertinentes au-delà de la section
+    active** (personnages présents, lectures liées, mots de la demande ; 8 unités en Structurer/Cohérence, 3 en Réviser,
+    1 en Écrire, budget 30 000 car.). Le document ouvert est relu depuis l'éditeur. Bloc « Périmètre consulté » toujours
+    envoyé (couverture, partielle ou non, passages joints et pourquoi, non consulté, « sources insuffisantes » le cas échéant).
+  - Contexte du partenaire : nouveaux éléments visibles/décochables (Intentions, Décisions, Lectures, Connaissances,
+    Passages), balises `<lectures>`, `<connaissances>`, `<intentions>`, `<decisions>`, `<perimetre>` traitées comme matériau ;
+    la demande en cours de saisie oriente l'aperçu.
+  - **Intentions de l'auteur** (Lecture › « Mes intentions », stockées dans `_COMPREHENSION.json`) : ton, thème, expérience,
+    voix, ambiguïté volontaire, à préserver, piste ouverte ; facultatif « concerne » et passage exact (bouton « Utiliser le
+    passage ciblé »). Saisie auteur seulement, modifiable, retirable avec confirmation.
+  - **Critique** (`core/critique.js`) pour Structurer / Réviser / Cohérence : rappel de l'intention et du périmètre, blocs
+    `<remarque nature="erreur|lisibilite|preference|ambiguite|question">` (constat, passages, raisonnement, effet, pistes,
+    question), consignes anti-diagnostic générique, abstention permise. Chaque passage cité est cherché dans le contexte
+    réellement envoyé : introuvable → « non étayée » ; passage marqué ambiguïté volontaire → « à lire comme une question ».
+    Cartes de remarque dans la conversation : « Retenir » / « Je maintiens mon choix » → décision dans `_PARTNER.json`
+    (`decisions`), renvoyée aux demandes suivantes, listée (et oubliable) dans le tiroir Canon. Le texte n'est jamais modifié.
+  - **Bible** : fiche Personnage/Lieu › « Lectures du projet » (alias compris) : validées, « ce qu'il ou elle apprend, dans
+    l'ordre du récit », à vérifier repliées ; Valider / Rejeter / Corriger (ouvre Lecture) / lien vers la ligne source.
+    Même mémoire que l'espace Lecture.
+  - **Protocole d'évaluation** : `App/eval/` (PROTOCOLE.md, 4 scénarios fictifs à attentes humaines : attendu, interdit,
+    indéterminé, pas-avant, entité ; notation hors ligne `npm run eval:lecture -- prompts|score|demo`). Aucun appel IA ;
+    `demo` = réponses simulées (prudente : 15/15 ; contaminée : défauts relevés). Sorties dans `App/eval/out/` (ignoré par git).
+  - 161 tests (+12 `test/recall.test.js` : cas 4 et 10 du prompt, contexte, intentions, décisions ; +4 `test/reading-eval.test.js`).
+    Banc Electron sur API simulée (projet fictif en mémoire, IA simulée) : 15 contrôles OK, 0 erreur console ; captures
+    1000 / 1400 px, clair et sombre. Aucun appel IA réel, application non testée à la main.
+
 ## Next
+- **Compréhension, incrément 4** : bible riche (sections dépliables personnages / lieux / systèmes, correction depuis la
+  fiche des champs extraits) et images/références locales (`media/` du projet, index, galerie, inspiration vs design validé).
+- **Utilisateur** : Lecture › « Mes intentions » sur L'ABRI (ton, ambiguïtés volontaires…), puis une question en
+  Cohérence ou Structurer : vérifier le « Contexte envoyé » et les remarques (premier appel payant).
+- **Utilisateur** (facultatif) : `npm run eval:lecture -- prompts eval/out`, envoyer les consignes au modèle choisi, puis `score`.
+- **Utilisateur** : ouvrir L'ABRI › Lecture, choisir les sources, « Lire le projet » (premier appel payant : ~7 unités),
+  puis valider / rejeter / corriger les lectures.
+- **Utilisateur** : relancer « Analyser les notes » sur un projet, ouvrir Bible › « À examiner », essayer Valider / Retirer.
 - **Utilisateur** : révoquer l'ancienne clé OpenAI ; tester à la main l'incrément 1.
 - **Utilisateur** : ouvrir chaque projet, lire l'aperçu, accepter (ou non) la migration ; relancer
   « Synchroniser » sur Origin Zero pour obtenir les blocs ordonnés (les anciennes pages restent sinon en v1 d'affichage).
@@ -157,14 +254,24 @@ Les projets réels sont encore au format v1 : la migration est proposée à leur
 - Propositions ancrées sur le texte des documents `.md` (position + texte exact), pas sur les blocs de `_PROJECT.json`.
 - Pas de création/renommage de document depuis l'app ; documents des sous-dossiers non listés.
 - Réponses IA non diffusées en continu (attente de la réponse complète, annulable) ; Markdown des réponses affiché brut.
-- Contexte limité au passage, à sa section et aux fiches nommées : pas de recherche dans tout le manuscrit.
+- Recherche des passages pertinents : locale et lexicale (noms, alias, mots de la demande), limitée aux sources
+  retenues dans Lecture ; les autres documents ouverts ne sont relus qu'au rafraîchissement de Lecture (le document
+  ouvert, lui, est toujours à jour). Pas de recherche sémantique.
+- Remarques critiques : on vérifie que les passages cités existent, pas que le raisonnement est juste. Ambiguïté
+  volontaire reconnue seulement si elle est ancrée sur un passage.
+- Lectures validées visibles dans la fiche, mais pas encore recopiées dans ses champs (Objectifs, etc.) : incrément 4.
 - Conversations précédentes conservées dans `_PARTNER.json` mais pas encore consultables dans l'interface.
-- Analyses heuristiques du parseur (type, description, forces…) toujours écrites comme champs, pas comme suggestions.
+- Fiches déjà enregistrées : les anciennes déductions du parseur restent affichées « provenance non renseignée · à vérifier »
+  jusqu'à décision de l'auteur (Valider / Retirer) ; aucune n'a été supprimée.
+- Bible › Analyse automatique (contexte du monde, indices) : toujours des indices lexicaux, présentés comme hypothèses.
+- Lecture : la synthèse est structurée (pas de résumé rédigé par l'IA). Sources hors du dossier du projet
+  (`../Scenario_Manga/`) non lisibles.
+- Le parseur ne prend pas pour locuteur un nom commençant par un article (« Le Voyageur ») : garde-fou existant.
 - Pas de fusion d'alias assistée (seulement signalée).
 - Parcours de migration/restauration non testés à la main dans l'UI.
 - CSP : `unsafe-inline` encore nécessaire (styles/handlers en ligne de l'ancien code).
 - Projets/config dépendent du dossier d'installation : pas d'installeur (electron-builder) tant que l'espace de travail n'est pas séparé ; le raccourci pointe vers le dossier actuel (à recréer si déplacé).
-- `app.js` encore gros (~1 900 lignes) ; heuristiques de `manga-analysis.js` taillées pour les projets existants (noms en dur).
+- `app.js` encore gros (~1 900 lignes).
 - Lien scène ↔ section : un renommage fait hors de l'app, ou plusieurs titres changés d'un coup, n'est pas suivi (signalé à l'ouverture de la scène).
 - Annulation Structure/Bible en mémoire seulement : perdue à la fermeture ou au changement de projet.
 

@@ -10,7 +10,8 @@
     "build:win": "electron-builder --win",
     "build:mac": "electron-builder --mac",
     "build:linux": "electron-builder --linux",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "eval:lecture": "node eval/run.js"
   },
   "keywords": [
     "writing",

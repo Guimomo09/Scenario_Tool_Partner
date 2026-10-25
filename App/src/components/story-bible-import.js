@@ -339,7 +339,7 @@ class StoryBibleImport {
       system_updates: extracted.systems || [],
       timeline_updates: extracted.timeline || [],
       todos: extracted.todos || []
-    });
+    }, { origin: 'import' });
 
     if (extracted.arcs?.length) {
       const result = window.ProjectModel.mergeByKey(

@@ -3,8 +3,9 @@
 // (script, personnages, lieux, contexte) appliquées ensuite par ProjectModel.applyUpdates.
 
 class MangaAnalysis {
-  // Convertir le parsing manga en format standard pour l'application
-  convertMangaToUpdates(parsed) {
+  // Convertir le parsing manga en format standard pour l'application.
+  // known : fiches existantes { characters, places } (alias confirmés, personnages muets, lieux)
+  convertMangaToUpdates(parsed, known = {}, documentName = '_NOTES.md') {
     const updates = {
       script_updates: [],
       character_updates: [],
@@ -37,7 +38,7 @@ class MangaAnalysis {
         dialogue: dialogueText || null,
         thoughts: thoughtText || null,
         character: mainCharacter,
-        source: '_NOTES.md',
+        source: documentName,
         sourceLines: [page.line, lastBlock.line + lastBlock.raw.split('\n').length - 1],
         _blocks: page.blocks,
         // Vues séparées conservées pour la compatibilité (l'ordre commun est dans _blocks)
@@ -47,457 +48,189 @@ class MangaAnalysis {
       });
     });
     
-    // Convertir les personnages avec analyse approfondie
+    // Personnages, lieux, chronologie : observations sourcées uniquement (qui parle, où il apparaît,
+    // extraits exacts). Aucun trait, objectif ou relation n'est déduit de la présence d'un mot :
+    // ces lectures relèvent de l'auteur ou d'une analyse sémantique présentée comme proposition.
+    const content = parsed.pages.flatMap(p => p.blocks.map(b => b.raw)).join('\n');
+
+    // Indices lexicaux sur le monde : hypothèses affichées à part (Bible › Analyse automatique),
+    // jamais écrites dans les fiches
+    const worldContext = this.analyzeWorldContext(content, parsed.pages);
+    updates.worldContext = worldContext;
+    updates.narrativeClues = worldContext.narrativeClues;
+
+    // Chronologie : une durée explicite du texte (« 20 ans après la chute »), avec son extrait
+    updates.timeline_updates.push(...this.detectExplicitEvents(parsed.pages, documentName));
+
+    const knownCharacters = (known.characters || []).filter(c => c && typeof c === 'object' && c.name);
+    const norm = (v) => String(v ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+    // Alias confirmés (fiche de la bible) → fiche ; un alias porté par plusieurs fiches reste ambigu
+    const aliasOwners = new Map();
+    knownCharacters.forEach(c => (Array.isArray(c.aliases) ? c.aliases : []).forEach(a => {
+      const key = norm(a);
+      if (!key) return;
+      aliasOwners.set(key, [...(aliasOwners.get(key) || []), c]);
+    }));
+    const byName = new Map(knownCharacters.map(c => [norm(c.name), c]));
+    // Un alias ambigu ne sert jamais à rattacher une réplique ou une présence à une fiche
+    const usableAliases = (c) => (Array.isArray(c.aliases) ? c.aliases : []).filter(a => (aliasOwners.get(norm(a)) || []).length === 1);
+    updates._notices = [];
+    const covered = new Set();
+
     const minDialogueForGeneric = 3;
     const genericRoles = ['présentateur', 'technicien', 'majordome', 'garde', 'soldat', 'voix'];
-    const content = parsed.pages.flatMap(p => p.blocks.map(b => b.raw)).join('\n');
-    
-    // === ANALYSE DU CONTEXTE DU MONDE ===
-    const worldContext = this.analyzeWorldContext(content, parsed.pages);
-    
-    // Stocker le contexte mondial dans les updates
-    updates.worldContext = worldContext;
-    
-    // === GÉNÉRER LES LIEUX ENRICHIS ===
-    const placesMap = new Map();
-    parsed.pages.forEach(page => {
-      if (page.location && page.location.trim()) {
-        const locName = page.location.trim();
-        if (!placesMap.has(locName)) {
-          placesMap.set(locName, {
-            name: locName,
-            firstMention: page.number,
-            sceneCount: 1
-          });
-        } else {
-          placesMap.get(locName).sceneCount++;
-        }
-      }
-    });
-    
-    // Enrichir chaque lieu avec analyse profonde
-    placesMap.forEach((placeData, placeName) => {
-      const enriched = this.enrichPlaceUpdate(placeData, worldContext, parsed.pages);
-      updates.place_updates.push(enriched);
-    });
-    
-    // === GÉNÉRER LES SYSTÈMES DU MONDE ===
-    // Système politique
-    if (worldContext.politics.type !== 'indéterminé') {
-      updates.system_updates.push({
-        name: worldContext.politics.type,
-        category: 'Politique',
-        description: this.generatePoliticsDescription(worldContext.politics),
-        details: {
-          leader: worldContext.politics.leader,
-          hierarchy: worldContext.politics.hierarchy,
-          propaganda: worldContext.politics.propaganda,
-          control: worldContext.politics.control
-        }
-      });
-    }
-    
-    // Système de ressources
-    if (worldContext.resources.scarce.length > 0 || worldContext.resources.controlled.length > 0) {
-      updates.system_updates.push({
-        name: 'Économie de pénurie',
-        category: 'Ressources',
-        description: this.generateResourcesDescription(worldContext.resources),
-        details: {
-          scarce: worldContext.resources.scarce,
-          controlled: worldContext.resources.controlled,
-          implications: worldContext.resources.implications
-        }
-      });
-    }
-    
-    // Structure sociale
-    if (worldContext.society.groups.length > 0) {
-      updates.system_updates.push({
-        name: 'Structure sociale',
-        category: 'Société',
-        description: this.generateSocietyDescription(worldContext.society),
-        details: {
-          groups: worldContext.society.groups,
-          dynamics: worldContext.society.dynamics,
-          tensions: worldContext.society.tensions
-        }
-      });
-    }
-    
-    // Niveau technologique
-    if (worldContext.technology.working.length > 0) {
-      updates.system_updates.push({
-        name: 'Niveau technologique',
-        category: 'Technologie',
-        description: `Technologies fonctionnelles: ${worldContext.technology.working.join(', ')}`,
-        details: worldContext.technology
-      });
-    }
-    
-    // === TIMELINE DU MONDE ===
-    if (worldContext.timeline.events.length > 0) {
-      worldContext.timeline.events.forEach(event => {
-        // `period` est requis par la validation : sans lui l'événement serait écarté
-        updates.timeline_updates.push({
-          period: event.when || 'Avant le récit',
-          event: event.name,
-          when: event.when,
-          significance: event.significance
-        });
-      });
-    }
-    
-    // === INDICES NARRATIFS ===
-    updates.narrativeClues = worldContext.narrativeClues;
-    
     parsed.characters.forEach((char, name) => {
       const isGeneric = genericRoles.some(r => name.toLowerCase().includes(r));
-      
-      // Garder seulement si : pas générique OU a assez de dialogues
-      if (!isGeneric || char.dialogueCount >= minDialogueForGeneric) {
-        // Analyse approfondie du personnage
-        const analysis = this.analyzeCharacter(name, char, parsed.pages, content);
-        
-        // Le rôle n'est jamais attribué par l'analyse : seulement suggéré, avec sa justification
-        updates.character_updates.push({
-          name: char.name,
-          ...(char.suggestion ? {
-            suggestedRole: char.suggestion.role,
-            suggestionSource: `analyse locale : ${char.suggestion.evidence}`
-          } : {}),
-          type: analysis.type,
-          description: analysis.description,
-          traits: analysis.traits,
-          strengths: analysis.strengths,
-          weaknesses: analysis.weaknesses,
-          goals: analysis.goals,
-          motivations: analysis.motivations,
-          relationships: analysis.relationships,
-          arc: analysis.arc,
-          keyQuotes: analysis.keyQuotes,
-          firstAppearance: char.firstAppearance,
-          dialogueCount: char.dialogueCount
-        });
+      if (isGeneric && char.dialogueCount < minDialogueForGeneric) return;
+
+      let sheet = byName.get(norm(name)) || null;
+      if (!sheet) {
+        const owners = aliasOwners.get(norm(name)) || [];
+        if (owners.length === 1) sheet = owners[0];
+        else if (owners.length > 1) {
+          updates._notices.push(`« ${name} » est un alias de plusieurs fiches (${owners.map(o => o.name).join(', ')}) : gardé séparé.`);
+        }
       }
+      const names = sheet ? [sheet.name, ...usableAliases(sheet), name] : [name];
+      if (sheet) covered.add(norm(sheet.name));
+      const obs = this.observeCharacter(names, parsed.pages, documentName);
+      // Le rôle n'est jamais attribué par l'analyse : seulement suggéré, avec sa justification
+      updates.character_updates.push({
+        name: sheet ? sheet.name : char.name,
+        ...(char.suggestion ? {
+          suggestedRole: char.suggestion.role,
+          suggestionSource: `analyse locale : ${char.suggestion.evidence}`
+        } : {}),
+        firstAppearance: char.firstAppearance,
+        dialogueCount: char.dialogueCount,
+        thoughtCount: char.thoughtCount || 0,
+        ...obs
+      });
     });
-    
+
+    // Personnages de la bible qui ne parlent pas ici (muets, absents des répliques) : présence relevée
+    knownCharacters.filter(c => !covered.has(norm(c.name)) && !parsed.characters.has(c.name)).forEach(c => {
+      const obs = this.observeCharacter([c.name, ...usableAliases(c)], parsed.pages, documentName);
+      if (!obs.appearances.length) return;
+      updates.character_updates.push({ name: c.name, firstAppearance: obs.appearances[0], ...obs });
+    });
+
+    // Lieux de la bible : phrases d'action qui les nomment (et atmosphère lue dans ces phrases seulement)
+    (known.places || []).filter(p => p && typeof p === 'object' && p.name).forEach(place => {
+      const update = this.observePlace(place, parsed.pages, documentName);
+      if (update) updates.place_updates.push(update);
+    });
+
     return updates;
   }
-  
-  // === GÉNÉRATEURS DE DESCRIPTIONS POUR LES SYSTÈMES ===
-  
-  generatePoliticsDescription(politics) {
-    let desc = `${politics.type}`;
-    if (politics.leader) {
-      desc += ` dirigé par ${politics.leader.title}. `;
-    }
-    if (politics.propaganda.length > 0) {
-      desc += `Propagande: ${politics.propaganda.join(', ')}. `;
-    }
-    if (politics.control.length > 0) {
-      desc += `Contrôle via: ${politics.control.join(', ')}.`;
-    }
-    return desc;
+
+  // Expression régulière d'un nom entier (« Ari » ne trouve pas « Arianne »)
+  nameRegex(names) {
+    const parts = [...new Set(names.map(n => String(n || '').trim()).filter(n => n.length >= 2))]
+      .map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    if (!parts.length) return null;
+    return new RegExp(`(^|[^\\p{L}\\p{N}])(${parts.join('|')})(?=[^\\p{L}\\p{N}]|$)`, 'iu');
   }
-  
-  generateResourcesDescription(resources) {
-    let desc = 'Économie de rareté. ';
-    if (resources.scarce.length > 0) {
-      desc += `Ressources rares: ${resources.scarce.map(r => r.item).join(', ')}. `;
-    }
-    if (resources.implications.length > 0) {
-      desc += resources.implications[0];
-    }
-    return desc;
-  }
-  
-  generateSocietyDescription(society) {
-    let desc = '';
-    if (society.groups.length > 0) {
-      desc += `Groupes: ${society.groups.map(g => g.name).join(', ')}. `;
-    }
-    if (society.dynamics.length > 0) {
-      desc += `Dynamiques: ${society.dynamics.join(', ')}.`;
-    }
-    return desc;
-  }
-  
-  // === ANALYSE APPROFONDIE DES PERSONNAGES ===
-  analyzeCharacter(name, charData, pages, fullContent) {
-    const lowName = name.toLowerCase();
-    const lowContent = fullContent.toLowerCase();
-    
-    // Collecter tous les éléments liés au personnage
-    const dialogues = [];
-    const thoughts = [];
-    const actions = [];
-    const mentionedWith = new Map(); // Autres personnages mentionnés avec lui
-    
+
+  // Observations d'un personnage : pages où il parle, pense ou est nommé dans une action ;
+  // extraits exacts localisés ; personnes présentes sur les mêmes pages (ce n'est pas une relation)
+  observeCharacter(names, pages, documentName = '_NOTES.md') {
+    const speakers = new Set(names.map(n => String(n).toLowerCase()));
+    const re = this.nameRegex(names);
+    const appearances = new Set();
+    const quotes = { thought: [], dialogue: [] };
+    const together = new Map();
+
     pages.forEach(page => {
-      // Dialogues du personnage
-      page.dialogues.filter(d => d.speaker.toLowerCase() === lowName).forEach(d => {
-        dialogues.push({ page: page.number, text: d.text });
-      });
-      
-      // Pensées du personnage
-      page.thoughts.filter(t => t.speaker.toLowerCase() === lowName).forEach(t => {
-        thoughts.push({ page: page.number, text: t.text });
-      });
-      
-      // Actions qui le mentionnent
-      page.actions.filter(a => a.text.toLowerCase().includes(lowName)).forEach(a => {
-        actions.push({ page: page.number, text: a.text });
-      });
-      
-      // Relations - qui parle à qui dans la même page
-      const speakers = new Set([...page.dialogues.map(d => d.speaker), ...page.thoughts.map(t => t.speaker)]);
-      if (speakers.has(name)) {
-        speakers.forEach(s => {
-          if (s !== name) {
-            mentionedWith.set(s, (mentionedWith.get(s) || 0) + 1);
+      let present = false;
+      page.blocks.forEach(b => {
+        if ((b.type === 'dialogue' || b.type === 'thought') && speakers.has(String(b.speaker || '').toLowerCase())) {
+          present = true;
+          if (b.text.length > 20 && b.text.length < 150) {
+            quotes[b.type].push({ type: b.type === 'thought' ? 'pensée' : 'réplique', text: b.text, page: page.number, line: b.line, document: documentName });
           }
+        } else if (b.type === 'action' && re && re.test(b.text)) {
+          present = true;
+        }
+      });
+      if (!present) return;
+      appearances.add(page.number);
+      page.blocks
+        .filter(b => (b.type === 'dialogue' || b.type === 'thought') && b.speaker && !speakers.has(b.speaker.toLowerCase()))
+        .forEach(b => {
+          const pagesWith = together.get(b.speaker) || new Set();
+          pagesWith.add(page.number);
+          together.set(b.speaker, pagesWith);
         });
-      }
     });
-    
-    // === ANALYSE DU RÔLE NARRATIF ===
-    const role = charData.suggestion?.role || '';
-    const type = this.determineCharacterType(name, role, dialogues, thoughts, actions, lowContent);
-    
-    // === ANALYSE DES TRAITS DE CARACTÈRE ===
-    const traits = this.extractTraits(dialogues, thoughts, actions, lowContent, lowName);
-    
-    // === FORCES ET FAIBLESSES ===
-    const { strengths, weaknesses } = this.extractStrengthsWeaknesses(name, dialogues, thoughts, actions, lowContent);
-    
-    // === OBJECTIFS ET MOTIVATIONS ===
-    const { goals, motivations } = this.extractGoalsMotivations(name, dialogues, thoughts, lowContent);
-    
-    // === RELATIONS ===
-    const relationships = [];
-    mentionedWith.forEach((count, otherChar) => {
-      const relationshipType = this.guessRelationship(name, otherChar, lowContent);
-      if (relationshipType) {
-        relationships.push({ character: otherChar, type: relationshipType, interactions: count });
-      }
-    });
-    
-    // === ARC DE DÉVELOPPEMENT ===
-    const arc = this.detectCharacterArc(name, dialogues, thoughts, actions, pages);
-    
-    // === CITATIONS CLÉS ===
-    const keyQuotes = this.extractKeyQuotes(dialogues, thoughts);
-    
-    // === DESCRIPTION SYNTHÉTIQUE ===
-    const description = this.generateCharacterDescription(name, role, type, traits, goals);
-    
+
     return {
-      role, type, description, traits, strengths, weaknesses,
-      goals, motivations, relationships, arc, keyQuotes
+      appearances: [...appearances].sort((a, b) => a - b),
+      keyQuotes: [...quotes.thought.slice(0, 3), ...quotes.dialogue.slice(0, 2)].slice(0, 4),
+      coPresence: [...together.entries()]
+        .sort((a, b) => b[1].size - a[1].size)
+        .slice(0, 6)
+        .map(([character, set]) => ({ character, pages: [...set].sort((a, b) => a - b) }))
     };
   }
-  
-  determineCharacterType(name, role, dialogues, thoughts, actions, lowContent) {
-    const lowName = name.toLowerCase();
-    
-    // Basé sur le rôle et le comportement
-    if (role === 'Protagoniste') return 'Héros / Personnage principal';
-    if (role === 'Antagoniste') {
-      if (lowContent.includes('père') && lowContent.includes(lowName)) return 'Tyran bienveillant';
-      return 'Antagoniste principal';
-    }
-    if (role === 'Traître') return 'Faux allié / Traître';
-    if (role === 'Rebelle') return 'Allié rebelle';
-    if (role === 'Figurant') return 'Personnage secondaire';
-    
-    // Si beaucoup de pensées mais peu de dialogues → personnage introspectif
-    if (thoughts.length > dialogues.length) return 'Personnage conflictuel';
-    
-    return 'Personnage de soutien';
-  }
-  
-  extractTraits(dialogues, thoughts, actions, lowContent, lowName) {
-    const traits = [];
-    
-    // Analyse des patterns dans les dialogues et pensées
-    const allText = [...dialogues.map(d => d.text), ...thoughts.map(t => t.text)].join(' ').toLowerCase();
-    
-    // Traits positifs
-    if (allText.match(/merci|reconnaissance|gratitude/)) traits.push('Reconnaissant(e)');
-    if (allText.match(/je.*protéger|sauver|aider/)) traits.push('Protecteur/trice');
-    if (allText.match(/devoir|honneur|mission/)) traits.push('Dévoué(e)');
-    if (allText.match(/je dois|il faut que|pas le choix/)) traits.push('Déterminé(e)');
-    if (allText.match(/perspicace|remarqu|observ/)) traits.push('Observateur/trice');
-    if (lowContent.includes(`${lowName} réfléchi`) || thoughts.length > 5) traits.push('Réfléchi(e)');
-    
-    // Traits négatifs ou complexes
-    if (allText.match(/impossible|je.*croire|choqué/)) traits.push('Idéaliste');
-    if (allText.match(/anxieu|inqui[eè]t|peur|crainte/)) traits.push('Anxieux/se');
-    if (allText.match(/confiance|croire en/i) && allText.match(/père|supérieur/)) traits.push('Loyal(e)');
-    if (allText.match(/sacrifice|nécessaire|pour.*bien/)) traits.push('Pragmatique');
-    if (allText.match(/pouvoir|contrôle|domin/)) traits.push('Autoritaire');
-    if (allText.match(/mentir|cacher|secret/)) traits.push('Dissimulateur/trice');
-    
-    // Traits militaires
-    if (lowContent.includes('salut militaire') || lowContent.includes('capitaine') || lowContent.includes('lieutenant')) {
-      traits.push('Discipliné(e)');
-    }
-    
-    return [...new Set(traits)].slice(0, 6); // Max 6 traits
-  }
-  
-  extractStrengthsWeaknesses(name, dialogues, thoughts, actions, lowContent) {
-    const lowName = name.toLowerCase();
-    const strengths = [];
-    const weaknesses = [];
-    
-    const allText = [...dialogues.map(d => d.text), ...thoughts.map(t => t.text)].join(' ').toLowerCase();
-    
-    // Forces
-    if (lowContent.includes('meilleurs résultats') || lowContent.includes('exemplaire')) {
-      strengths.push('Excellence académique/professionnelle');
-    }
-    if (lowContent.includes(`${lowName}.*compétent`) || lowContent.includes('plus jeune')) {
-      strengths.push('Talent exceptionnel');
-    }
-    if (allText.match(/je.*trouver.*moyen|solution/)) strengths.push('Résolution de problèmes');
-    if (thoughts.length > 3) strengths.push('Introspection');
-    if (lowContent.includes('expérience') && lowContent.includes(lowName)) strengths.push('Expérience');
-    if (lowContent.includes('confiance') && !allText.includes('confiance aveugle')) {
-      strengths.push('Inspire confiance');
-    }
-    
-    // Faiblesses
-    if (allText.match(/je ne.*croire|impossible/)) weaknesses.push('Difficulté à accepter la réalité');
-    if (allText.match(/confiance.*père|loyal.*père/)) weaknesses.push('Loyauté aveugle (initialement)');
-    if (allText.match(/je ne peux pas|tuer/)) weaknesses.push('Conflits moraux');
-    if (lowContent.includes('surprise') && lowContent.includes(lowName)) weaknesses.push('Naïveté');
-    if (allText.match(/seul|isolé/)) weaknesses.push('Isolement');
-    
-    return { 
-      strengths: [...new Set(strengths)].slice(0, 4), 
-      weaknesses: [...new Set(weaknesses)].slice(0, 4) 
-    };
-  }
-  
-  extractGoalsMotivations(name, dialogues, thoughts, lowContent) {
-    const goals = [];
-    const motivations = [];
-    const lowName = name.toLowerCase();
-    
-    const allThoughts = thoughts.map(t => t.text).join(' ').toLowerCase();
-    const allDialogues = dialogues.map(d => d.text).join(' ').toLowerCase();
-    
-    // Objectifs explicites dans les pensées
-    if (allThoughts.match(/je dois.*sauver|protéger/)) goals.push('Sauver/protéger quelqu\'un');
-    if (allThoughts.match(/trouver.*moyen|solution/)) goals.push('Trouver une alternative');
-    if (allThoughts.match(/éliminer|débarrasser|mettre.*terme/)) goals.push('Éliminer une menace');
-    if (allThoughts.match(/comprendre|découvrir.*vérité/)) goals.push('Découvrir la vérité');
-    
-    // Objectifs dans les dialogues
-    if (allDialogues.match(/pour.*bien.*peuple|abri|humanité/)) goals.push('Servir le bien commun');
-    if (allDialogues.match(/mission|devoir/)) goals.push('Accomplir sa mission');
-    
-    // Motivations (pourquoi)
-    if (lowContent.includes('orphelin') && lowContent.includes(lowName)) {
-      motivations.push('Prouver sa valeur (orphelin)');
-    }
-    if (allThoughts.match(/père.*fait.*pour/)) motivations.push('Gratitude envers une figure d\'autorité');
-    if (allThoughts.match(/ami|even|ensemble/)) motivations.push('Loyauté envers ses amis');
-    if (lowContent.includes('régime') || lowContent.includes('règne')) {
-      motivations.push('Libérer les opprimés');
-    }
-    if (allDialogues.match(/confiance|fiert[ée]/)) motivations.push('Maintenir sa réputation');
-    
-    return {
-      goals: [...new Set(goals)].slice(0, 3),
-      motivations: [...new Set(motivations)].slice(0, 3)
-    };
-  }
-  
-  guessRelationship(char1, char2, lowContent) {
-    const pair = `${char1.toLowerCase()}.*${char2.toLowerCase()}`;
-    const pairReverse = `${char2.toLowerCase()}.*${char1.toLowerCase()}`;
-    
-    // Patterns de relation
-    if (lowContent.match(new RegExp(`${pair}.*ami|${pairReverse}.*ami`, 'i'))) return 'Ami(e)';
-    if (lowContent.match(new RegExp(`${pair}.*ennemi|${pairReverse}.*ennemi`, 'i'))) return 'Ennemi';
-    if (lowContent.match(/père/) && (char1.toLowerCase() === 'keyn' || char2.toLowerCase() === 'keyn')) return 'Supérieur/Figure paternelle';
-    if (lowContent.match(new RegExp(`${char1.toLowerCase()}.*sous.*ordres`))) return 'Subordonné';
-    if (lowContent.match(new RegExp(`ensemble|côte à côte|équipe`))) return 'Coéquipier';
-    
-    return 'Connaît';
-  }
-  
-  detectCharacterArc(name, dialogues, thoughts, actions, pages) {
-    const lowName = name.toLowerCase();
-    
-    // Analyser l'évolution entre le début et la fin
-    const totalPages = pages.length;
-    const firstThird = Math.floor(totalPages / 3);
-    const lastThird = totalPages - firstThird;
-    
-    const earlyThoughts = thoughts.filter(t => t.page <= firstThird).map(t => t.text).join(' ').toLowerCase();
-    const lateThoughts = thoughts.filter(t => t.page >= lastThird).map(t => t.text).join(' ').toLowerCase();
-    
-    // Détecter le changement
-    if (earlyThoughts.includes('confiance') && lateThoughts.includes('impossible')) {
-      return 'De la confiance aveugle au doute';
-    }
-    if (earlyThoughts.includes('devoir') && lateThoughts.includes('choix')) {
-      return 'Du devoir au libre arbitre';
-    }
-    if (lateThoughts.includes('sauver') || lateThoughts.includes('trouver.*moyen')) {
-      return 'Prise de conscience et rébellion';
-    }
-    if (lateThoughts.includes('détermin')) {
-      return 'Vers la détermination';
-    }
-    
-    return null;
-  }
-  
-  extractKeyQuotes(dialogues, thoughts) {
-    const quotes = [];
-    
-    // Prioritiser les pensées (plus révélatrices)
-    thoughts.slice(0, 3).forEach(t => {
-      if (t.text.length > 20 && t.text.length < 150) {
-        quotes.push({ type: 'pensée', text: t.text, page: t.page });
-      }
+
+  // Phrases d'action qui nomment un lieu connu. L'atmosphère n'est lue que dans ces phrases :
+  // « La gare est sombre. Le port est calme. » ne rend pas le port sombre.
+  observePlace(place, pages, documentName = '_NOTES.md') {
+    const re = this.nameRegex([place.name, ...(Array.isArray(place.aliases) ? place.aliases : [])]);
+    if (!re) return null;
+    const mentions = [];
+    pages.forEach(page => page.blocks.filter(b => b.type === 'action').forEach(b => {
+      b.text.split(/(?<=[.!?…])\s+/).filter(s => re.test(s)).forEach(sentence => {
+        mentions.push({ page: page.number, line: b.line, text: sentence.trim(), document: documentName });
+      });
+    }));
+    if (!mentions.length) return null;
+    const update = { name: place.name, mentions: mentions.slice(0, 12) };
+    const moods = [];
+    const described = [];
+    mentions.forEach(m => {
+      const found = this.detectMoods(m.text);
+      if (found.length) described.push(m);
+      found.forEach(f => { if (!moods.includes(f)) moods.push(f); });
     });
-    
-    // Ajouter quelques dialogues significatifs
-    dialogues.filter(d => d.text.length > 30 && d.text.length < 150).slice(0, 2).forEach(d => {
-      quotes.push({ type: 'dialogue', text: d.text, page: d.page });
-    });
-    
-    return quotes.slice(0, 4);
+    if (moods.length) {
+      const first = described[0];
+      update.atmosphere = moods.join(', ');
+      update._evidence = { atmosphere: { document: documentName, page: first.page, line: first.line, quote: described.map(m => m.text).join(' ') } };
+    }
+    return update;
   }
-  
-  generateCharacterDescription(name, role, type, traits, goals) {
-    let desc = `${name} est `;
-    
-    if (role === 'Protagoniste') {
-      desc += 'le personnage principal de l\'histoire. ';
-    } else if (role === 'Antagoniste') {
-      desc += 'l\'antagoniste principal. ';
-    } else {
-      desc += `un personnage ${type.toLowerCase()}. `;
-    }
-    
-    if (traits.length > 0) {
-      desc += `${traits.slice(0, 3).join(', ')}. `;
-    }
-    
-    if (goals.length > 0) {
-      desc += `Son objectif : ${goals[0].toLowerCase()}.`;
-    }
-    
-    return desc;
+
+  detectMoods(text) {
+    const moods = [];
+    if (/sombre|noir|obscur|ténèbres/i.test(text)) moods.push('sombre');
+    if (/froid|glacia|gelé/i.test(text)) moods.push('froid');
+    if (/oppressant|étouff|claustro/i.test(text)) moods.push('oppressant');
+    if (/calme|paisible|tranquil/i.test(text)) moods.push('calme');
+    if (/lumineu|ensoleill|éclatant/i.test(text)) moods.push('lumineux');
+    if (/bruyant|vacarme|brouhaha/i.test(text)) moods.push('bruyant');
+    return moods;
   }
-  
+
+  // Événement daté explicitement dans le texte, avec l'extrait et sa page
+  detectExplicitEvents(pages, documentName = '_NOTES.md') {
+    const events = [];
+    const re = /(\d+)\s*ans?\s*(?:après|depuis)\s*(l'effondrement|la chute|la catastrophe|l'apocalypse|la guerre)/i;
+    pages.forEach(page => page.blocks.forEach(b => {
+      const m = b.text && b.text.match(re);
+      if (!m || events.some(e => e.period === `Il y a ${m[1]} ans`)) return;
+      const label = m[2].replace(/^(l'|la )/i, '');
+      events.push({
+        period: `Il y a ${m[1]} ans`,
+        event: label.charAt(0).toUpperCase() + label.slice(1),
+        // Où le texte l'affirme (une réplique peut se tromper : l'événement reste à vérifier)
+        evidence: { document: documentName, page: page.number, line: b.line, quote: b.text, ...(b.speaker ? { speaker: b.speaker } : {}) }
+      });
+    }));
+    return events;
+  }
+
   // === ANALYSE APPROFONDIE DU MONDE ===
   
   analyzeWorldContext(fullContent, pages) {
@@ -759,16 +492,6 @@ class MangaAnalysis {
       timeline.currentEra = `${collapseMatch[1]} ans après l'Effondrement`;
     }
     
-    // Fondation de l'abri
-    const shelterMatch = content.match(/(?:le père|keyn).*(?:fond|créé|constru).*abri/i);
-    if (shelterMatch) {
-      timeline.events.push({
-        name: 'Fondation de l\'Abri',
-        when: 'Peu après l\'Effondrement',
-        significance: 'Création du refuge, naissance du régime'
-      });
-    }
-    
     return timeline;
   }
   
@@ -874,134 +597,16 @@ class MangaAnalysis {
     return clues;
   }
   
-  // === ANALYSE APPROFONDIE DES LIEUX ===
-  
-  analyzePlaceDeep(placeName, pages, worldContext) {
-    const analysis = {
-      atmosphere: [],
-      access: 'indéterminé',
-      significance: [],
-      dangerLevel: 'inconnu',
-      whoGoesHere: [],
-      secrets: []
-    };
-    
-    const low = placeName.toLowerCase();
-    let placeContent = '';
-    
-    // Collecter tout ce qui mentionne ce lieu
-    pages.forEach(page => {
-      if (page.location && page.location.toLowerCase().includes(low)) {
-        // Tout le contenu de cette scène
-        page.dialogues.forEach(d => {
-          placeContent += d.text + ' ';
-        });
-        page.actions.forEach(a => {
-          placeContent += a + ' ';
-        });
-        
-        // Qui apparaît ici ?
-        page.dialogues.forEach(d => {
-          if (!analysis.whoGoesHere.includes(d.speaker)) {
-            analysis.whoGoesHere.push(d.speaker);
-          }
-        });
-      }
-    });
-    
-    // Analyser l'atmosphère
-    if (/sombre|noir|obscur|ténèbres/i.test(placeContent)) analysis.atmosphere.push('Sombre');
-    if (/froid|glacial|gelé/i.test(placeContent)) analysis.atmosphere.push('Froid');
-    if (/oppressant|étouff|claustro/i.test(placeContent)) analysis.atmosphere.push('Oppressant');
-    if (/danger|menace|risqu/i.test(placeContent)) analysis.atmosphere.push('Dangereux');
-    if (/calme|paisible|tranquil/i.test(placeContent)) analysis.atmosphere.push('Calme');
-    if (/secret|cach|interdit/i.test(placeContent)) analysis.atmosphere.push('Mystérieux');
-    
-    // Déterminer l'accès
-    if (/interdit|défendu|autoris.*seul|accès.*restreint/i.test(placeContent)) {
-      analysis.access = 'Restreint';
-    } else if (/public|tout le monde|commun/i.test(placeContent)) {
-      analysis.access = 'Public';
-    } else if (/secret|cach|personne ne sait/i.test(placeContent)) {
-      analysis.access = 'Secret';
-    }
-    
-    // Signification narrative
-    if (/réuni|rassembl|cérémonie/i.test(placeContent)) {
-      analysis.significance.push('Lieu de rassemblement');
-    }
-    if (/découvr|révél|vérité/i.test(placeContent)) {
-      analysis.significance.push('Lieu de révélation');
-    }
-    if (/combat|affrontement|bataille/i.test(placeContent)) {
-      analysis.significance.push('Lieu de confrontation');
-    }
-    if (/décision|choix|tournant/i.test(placeContent)) {
-      analysis.significance.push('Lieu de décision cruciale');
-    }
-    
-    return analysis;
-  }
-  
-  // === ENRICHIR LES UPDATES AVEC LE CONTEXTE MONDE ===
-  
-  enrichPlaceUpdate(place, worldContext, pages) {
-    const deepAnalysis = this.analyzePlaceDeep(place.name, pages, worldContext);
-    
-    return {
-      ...place,
-      atmosphere: deepAnalysis.atmosphere,
-      access: deepAnalysis.access,
-      significance: deepAnalysis.significance,
-      frequentedBy: deepAnalysis.whoGoesHere,
-      worldConnection: this.connectPlaceToWorld(place.name, worldContext)
-    };
-  }
-  
-  connectPlaceToWorld(placeName, worldContext) {
-    const connections = [];
-    const low = placeName.toLowerCase();
-    
-    // Connexion avec le système politique
-    if (worldContext.politics.type !== 'indéterminé') {
-      if (/salle.*commande|bureau.*père|centre.*contrôle/i.test(low)) {
-        connections.push({
-          aspect: 'Politique',
-          connection: 'Centre du pouvoir',
-          implication: 'Lieu stratégique du régime'
-        });
-      }
-    }
-    
-    // Connexion avec les ressources
-    if (/réserve|stockage|entrepôt|cuisine/i.test(low)) {
-      connections.push({
-        aspect: 'Ressources',
-        connection: 'Stockage/Distribution',
-        implication: 'Accès contrôlé aux ressources'
-      });
-    }
-    
-    // Connexion avec la surface/extérieur
-    if (/ascenseur|sas|sortie|surface|extérieur/i.test(low)) {
-      connections.push({
-        aspect: 'Frontière',
-        connection: 'Lien avec l\'extérieur',
-        implication: 'Zone de transition, danger potentiel'
-      });
-    }
-    
-    return connections;
-  }
-  
   // Parsing local sans API - détection de patterns
-  parseNotesLocally(notes) {
+  // known : fiches existantes du projet (alias, personnages muets, lieux nommés dans les actions)
+  parseNotesLocally(notes, known = {}) {
     // Détecter si c'est un script manga
     if (window.MangaParser.isMangaScript(notes)) {
       const mangaParsed = window.MangaParser.parse(notes);
-      const updates = this.convertMangaToUpdates(mangaParsed);
+      const updates = this.convertMangaToUpdates(mangaParsed, known);
       const aliases = window.MangaParser.aliasCandidates(mangaParsed.characters.keys());
       updates._notices = [
+        ...updates._notices,
         ...mangaParsed.warnings,
         ...aliases.map(a => `Noms proches gardés séparés (à fusionner vous-même si c'est la même personne) : « ${a.short} » / « ${a.long} »`)
       ];

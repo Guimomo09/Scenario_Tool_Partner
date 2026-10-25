@@ -47,6 +47,8 @@ class PartnerPanel {
     });
     send.addEventListener('click', () => this.send());
     cancel.addEventListener('click', () => this.cancel());
+    // La demande en cours de saisie oriente les passages joints (aperçu du contexte)
+    input.addEventListener('input', () => this.refreshContext(600));
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
         e.preventDefault();
@@ -65,6 +67,10 @@ class PartnerPanel {
       if (btn) this.onProposalAction(btn.dataset.proposalAction, btn.dataset.id);
       const remove = e.target.closest('[data-canon-remove]');
       if (remove) this.removeCanon(remove.dataset.canonRemove);
+      const remark = e.target.closest('[data-remark-action]');
+      if (remark) this.onRemarkAction(remark.dataset.remarkAction, remark.dataset.message, remark.dataset.id);
+      const decision = e.target.closest('[data-decision-remove]');
+      if (decision) this.removeDecision(decision.dataset.decisionRemove);
       const open = e.target.closest('[data-open-settings]');
       if (open) this.app.openSettings();
     });
@@ -222,28 +228,58 @@ class PartnerPanel {
   }
 
   // === Contexte ===
-  // Contexte calculé à partir de l'éditeur : document, sélection, position
-  buildContext() {
+  // Contexte calculé à partir de l'éditeur (document, sélection, position), complété par la mémoire
+  // narrative du projet (core/recall.js) : intentions, lectures, connaissances, passages pertinents.
+  // `message` : la demande (ou le brouillon en cours), qui oriente la recherche des passages.
+  buildContext(message = '') {
     const editor = this.app.editor;
     const entry = this.current;
     // Passage ciblé (garde la sélection même après un clic ailleurs), sinon sélection en cours
     const selection = this.app.targetRange();
+    const scene = this.app.activeSceneContext();
+    const docName = this.app.currentDoc?.name || '';
+    const docText = this.app.currentDoc ? editor.value : '';
     const items = window.PartnerContext.buildContextItems({
-      docName: this.app.currentDoc?.name || '',
-      docText: this.app.currentDoc ? editor.value : '',
-      selection,
+      docName, docText, selection,
       cursor: editor.selectionStart,
       projectData: this.app.projectData,
       canon: entry?.store.canon || [],
       excluded: [...this.excluded],
-      scene: this.app.activeSceneContext()
+      scene
     });
-    return { items, selection };
+    const recall = this.recallItems({ docName, docText, selection, scene, message, items });
+    return { items: [...items, ...recall.items], selection, recall };
   }
 
-  refreshContext() {
+  recallItems({ docName, docText, selection, scene, message, items }) {
+    const lecture = this.app.lecture;
+    const project = this.app.currentProject;
+    if (!project) return { items: [] };
+    const scan = lecture.scanResult?.projectPath === project.path ? lecture.scanResult : null;
+    // Unités pas encore calculées : recherche en arrière-plan, le contexte se met à jour ensuite
+    if (!scan) lecture.ensureScan().then(found => { if (found) this.refreshContext(); });
+    const U = window.Understanding;
+    let units = scan ? scan.units : [];
+    // Le document ouvert est relu depuis l'éditeur (modifications non enregistrées comprises)
+    if (docName && units.some(u => u.document === docName)) {
+      units = window.Recall.withCurrentDocument(units, docName, U.segment({ path: docName, content: docText, role: U.roleOf(lecture.store, docName) }).units);
+    }
+    const lineAt = (offset) => docText.slice(0, Math.max(0, offset)).split('\n').length;
+    const anchor = selection ? selection.start : this.app.editor.selectionStart;
+    const section = window.PartnerContext.findSection(docText, anchor);
+    const [from, to] = [lineAt(section.start), lineAt(Math.max(section.start, section.end - 1))];
+    const currentUnitIds = units.filter(u => u.document === docName && u.startLine <= to && u.endLine >= from).map(u => u.id);
+    const sent = items.filter(i => i.kind === 'selection' || i.kind === 'section').map(i => i.text).join('\n');
+    return window.Recall.contextItems({
+      store: lecture.store, units, projectData: this.app.projectData, intent: this.intent, docName,
+      cursorLine: lineAt(anchor), focusText: sent, message, sceneCharacterIds: scene?.characters || [],
+      currentUnitIds, decisions: this.current?.store.decisions || [], excluded: [...this.excluded]
+    });
+  }
+
+  refreshContext(delay = 250) {
     clearTimeout(this.contextTimer);
-    this.contextTimer = setTimeout(() => this.renderContext(), 250);
+    this.contextTimer = setTimeout(() => this.renderContext(), delay);
   }
 
   renderContext() {
@@ -253,7 +289,7 @@ class PartnerPanel {
       contextList.innerHTML = '<p class="empty-state">Aucun projet ouvert.</p>';
       return;
     }
-    const { items } = this.buildContext();
+    const { items } = this.buildContext(this.el.input.value);
     const conversation = window.PartnerStore.activeConversation(this.current.store);
     const preview = window.PartnerContext.assembleRequest({
       intent: this.intent, items, history: conversation.messages, userMessage: '…', projectData: this.app.projectData
@@ -265,17 +301,17 @@ class PartnerPanel {
     const rows = items.map(item => `
       <li class="context-item${item.included ? '' : ' excluded'}">
         <label>
-          <input type="checkbox" data-context-id="${esc(item.id)}" ${item.included ? 'checked' : ''} ${item.omitted && !this.excluded.has(item.id) ? 'disabled' : ''}>
+          <input type="checkbox" data-context-id="${esc(item.id)}" ${item.included ? 'checked' : ''} ${(item.omitted && !this.excluded.has(item.id)) || item.fixed ? 'disabled' : ''}${item.fixed ? ' title="Toujours envoyé : décrit ce que le partenaire a consulté"' : ''}>
           <span class="context-label">${esc(item.label)}</span>
         </label>
-        <span class="context-meta">${item.chars.toLocaleString('fr-FR')} car.${item.truncated ? ' · coupé à la limite' : ''}${item.omitted ? ` · non envoyé (${esc(item.omitted)})` : ''}</span>
+        <span class="context-meta">${item.chars.toLocaleString('fr-FR')} car.${item.why ? ` · ${esc(item.why)}` : ''}${item.truncated ? ' · coupé à la limite' : ''}${item.omitted ? ` · non envoyé (${esc(item.omitted)})` : ''}</span>
         <details><summary>Voir</summary><pre class="context-preview">${esc(item.text.slice(0, 1200))}${item.text.length > 1200 ? '\n[…]' : ''}</pre></details>
       </li>`).join('');
     const history = preview.history;
     contextList.innerHTML = `
       <ul class="context-items">${rows || '<li class="empty-state">Aucun passage : place le curseur dans le document ou sélectionne un extrait.</li>'}</ul>
       <p class="context-note">Historique : ${history.keptPairs} échange${history.keptPairs > 1 ? 's' : ''} envoyé${history.keptPairs > 1 ? 's' : ''}${history.omittedPairs ? `, ${history.omittedPairs} plus ancien${history.omittedPairs > 1 ? 's' : ''} non envoyé${history.omittedPairs > 1 ? 's' : ''} (limite ${window.PartnerContext.LIMITS.history.toLocaleString('fr-FR')} car.)` : ''}.</p>
-      <p class="context-note">Le partenaire ne voit que ces éléments : pas le reste du projet, ni Internet.${preview.overLimit ? ` <strong>Total au-delà de la limite (${preview.limit.toLocaleString('fr-FR')} car.) : décoche des éléments.</strong>` : ''}</p>`;
+      <p class="context-note">Le partenaire ne voit que ces éléments : pas le reste du projet, ni Internet. Lectures et passages viennent de l'espace Lecture ; la demande en cours oriente les passages joints.${preview.overLimit ? ` <strong>Total au-delà de la limite (${preview.limit.toLocaleString('fr-FR')} car.) : décoche des éléments.</strong>` : ''}</p>`;
   }
 
   // === Envoi ===
@@ -295,7 +331,7 @@ class PartnerPanel {
     if (!request) return; // une demande est déjà en cours dans cette conversation
 
     // Instantané au moment de l'envoi : les propositions sont ancrées sur ce texte
-    const { items, selection } = this.buildContext();
+    const { items, selection } = this.buildContext(text);
     const snapshot = { docName: this.app.currentDoc?.name || '', docText: this.app.currentDoc ? this.app.editor.value : '', selection, docVersion: this.app.docVersion };
     const history = conversation.messages.slice();
     const req = window.PartnerContext.assembleRequest({ intent: this.intent, items, history, userMessage: text, projectData: this.app.projectData });
@@ -331,9 +367,14 @@ class PartnerPanel {
       }
     } else if (result.success) {
       const extracted = window.Proposals.extractProposals(result.text);
+      // Remarques critiques : chaque passage cité est recherché dans le contexte réellement envoyé
+      const critique = window.Critique.extractRemarks(extracted.text);
+      const sources = items.filter(i => i.included && !['perimetre', 'intentions', 'decisions'].includes(i.kind));
+      const remarks = window.Critique.checkRemarks(critique.remarks, { sources, intentions: this.app.lecture.store.intentions || [] });
       const message = window.PartnerStore.addMessage(origin.store, conversation.id, {
-        role: 'assistant', content: result.text, display: extracted.text, intent: userMessage.intent,
-        model: result.model || '', truncated: !!result.truncated, problems: extracted.problems, replyTo: userMessage.id
+        role: 'assistant', content: result.text, display: critique.text, intent: userMessage.intent,
+        model: result.model || '', truncated: !!result.truncated, problems: [...extracted.problems, ...critique.problems], replyTo: userMessage.id,
+        ...(remarks.length ? { remarks } : {})
       });
       const proposals = window.Proposals.createProposals(extracted.proposals, { ...snapshot, messageId: message.id, intent: userMessage.intent });
       window.PartnerStore.addProposals(origin.store, proposals);
@@ -441,8 +482,46 @@ class PartnerPanel {
       <div class="message-meta">Partenaire${message.model ? ` · ${esc(message.model)}` : ''} · ${esc(time)}</div>
       <div class="message-content">${esc(message.display ?? message.content)}</div>
       ${notes.length ? `<div class="message-warning">${notes.map(esc).join('<br>')}</div>` : ''}
+      ${(message.remarks || []).map(r => this.renderRemark(r, message.id)).join('')}
       ${proposals.map(p => this.renderProposal(p)).join('')}
     </div>`;
+  }
+
+  // Remarque critique : nature, constat, passages (retrouvés ou non dans le contexte envoyé),
+  // raisonnement, effet, pistes ; l'auteur la retient ou maintient son choix (le texte n'est pas modifié)
+  renderRemark(r, messageId) {
+    const esc = (s) => this.app.escapeHtml(s);
+    const C = window.Critique;
+    const row = (label, value) => (value ? `<p class="remark-row"><span class="proposal-label">${label}</span>${esc(value)}</p>` : '');
+    const passages = r.passages.map(p => `<li class="${p.found ? 'found' : 'missing'}">« ${esc(p.text)} »
+      <span class="small muted">${p.found ? esc(p.where || 'contexte envoyé') : 'introuvable dans le contexte envoyé'}</span></li>`).join('');
+    const verdicts = { retenu: 'Retenue', maintenu: 'Choix maintenu' };
+    return `<div class="proposal remark" data-nature="${esc(r.nature)}"${r.unsupported ? ' data-unsupported="true"' : ''}>
+      <div class="proposal-head"><span class="proposal-mark">Remarque ${r.index} · ${esc(C.NATURES[r.nature] || r.nature)}</span>
+        ${r.decision ? `<span class="proposal-status" data-status="${r.decision === 'retenu' ? 'accepted' : 'variant'}">${verdicts[r.decision]}</span>` : ''}</div>
+      <p class="remark-constat">${esc(r.constat)}</p>
+      ${passages ? `<ul class="remark-passages">${passages}</ul>` : ''}
+      ${r.notes?.length ? `<p class="proposal-warning">${r.notes.map(esc).join('<br>')}</p>` : ''}
+      ${row('Raisonnement', r.raisonnement)}${row('Effet probable', r.effet)}${row('Pistes', r.pistes)}${row('Question', r.question)}
+      <div class="proposal-actions">
+        <button class="btn-secondary btn-small" data-remark-action="retenu" data-message="${esc(messageId)}" data-id="${esc(r.id)}"${r.decision === 'retenu' ? ' disabled' : ''} title="Je retiens ce point (à traiter ; le texte n'est pas modifié)">Retenir</button>
+        <button class="btn-secondary btn-small" data-remark-action="maintenu" data-message="${esc(messageId)}" data-id="${esc(r.id)}"${r.decision === 'maintenu' ? ' disabled' : ''} title="Je garde mon choix : le partenaire ne le reproposera pas comme un défaut">Je maintiens mon choix</button>
+      </div>
+    </div>`;
+  }
+
+  async onRemarkAction(verdict, messageId, remarkId) {
+    const entry = this.current;
+    if (!entry || entry.error) return;
+    const message = entry.store.conversations.flatMap(c => c.messages).find(m => m.id === messageId);
+    const remark = message?.remarks?.find(r => r.id === remarkId);
+    if (!remark) return;
+    const result = window.PartnerStore.addDecision(entry.store, { remarkId, messageId, verdict, text: window.Critique.decisionText(remark, verdict) });
+    if (!result.ok) { this.app.addChatMessage(result.reason, 'error'); return; }
+    remark.decision = verdict;
+    const saved = await this.save(this.app.currentProject.path);
+    if (!saved) this.app.addChatMessage('Décision non enregistrée.', 'error');
+    this.render();
   }
 
   renderProposal(p) {
@@ -482,11 +561,17 @@ class PartnerPanel {
   renderCanon() {
     const { canonCount, canonList } = this.el;
     const canon = this.current?.store.canon || [];
-    canonCount.textContent = canon.length ? `(${canon.length})` : '';
-    canonList.innerHTML = canon.length
-      ? `<ul class="canon-list">${canon.map(f => `<li><span>${this.app.escapeHtml(f.text)}</span>
-          <button class="btn-link" data-canon-remove="${this.app.escapeHtml(f.id)}" aria-label="Retirer ce fait du canon">Retirer</button></li>`).join('')}</ul>`
-      : '<p class="empty-state">Aucun fait validé. Les faits que tu ajoutes ici sont envoyés au partenaire comme canon.</p>';
+    const decisions = this.current?.store.decisions || [];
+    const esc = (s) => this.app.escapeHtml(s);
+    canonCount.textContent = canon.length || decisions.length ? `(${canon.length}${decisions.length ? ` · ${decisions.length} décision${decisions.length > 1 ? 's' : ''}` : ''})` : '';
+    canonList.innerHTML = (canon.length
+      ? `<ul class="canon-list">${canon.map(f => `<li><span>${esc(f.text)}</span>
+          <button class="btn-link" data-canon-remove="${esc(f.id)}" aria-label="Retirer ce fait du canon">Retirer</button></li>`).join('')}</ul>`
+      : '<p class="empty-state">Aucun fait validé. Les faits que tu ajoutes ici sont envoyés au partenaire comme canon.</p>') +
+      (decisions.length
+        ? `<p class="sub-label decisions-label">Décisions sur les remarques</p><ul class="canon-list">${decisions.map(d => `<li><span>${esc(d.text)}</span>
+            <button class="btn-link" data-decision-remove="${esc(d.id)}" aria-label="Oublier cette décision">Oublier</button></li>`).join('')}</ul>`
+        : '');
     const disabled = !this.current || Boolean(this.current.error);
     document.getElementById('canonInput').disabled = disabled;
     document.getElementById('btnAddCanon').disabled = disabled;
@@ -570,6 +655,15 @@ class PartnerPanel {
     const result = window.PartnerStore.addCanon(entry.store, input.value, { manual: true });
     if (result.duplicate) this.app.addChatMessage('Ce fait est déjà dans le canon.', 'info');
     if (await this.save(this.app.currentProject.path)) input.value = '';
+    this.renderCanon();
+    this.refreshContext();
+  }
+
+  async removeDecision(id) {
+    const entry = this.current;
+    if (!entry || entry.error) return;
+    if (!window.PartnerStore.removeDecision(entry.store, id)) return;
+    await this.save(this.app.currentProject.path);
     this.renderCanon();
     this.refreshContext();
   }

@@ -5,11 +5,11 @@
 
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('./schema'));
+    module.exports = factory(require('./schema'), require('./provenance'));
   } else {
-    root.ProjectModel = factory(root.ProjectSchema);
+    root.ProjectModel = factory(root.ProjectSchema, root.Provenance);
   }
-})(typeof self !== 'undefined' ? self : this, function (Schema) {
+})(typeof self !== 'undefined' ? self : this, function (Schema, Provenance) {
 
   const COLLECTIONS = Schema.COLLECTIONS;
 
@@ -23,7 +23,8 @@
   const NARRATIVE_ELEMENTS = /^(voix|voix[\s-]?off|narrateur|narrator|narration|texte|intertitre|carton|(sur|sous)[\s-]?titre)$/i;
   const STRUCTURE_WORDS = /^(page|séquence|sequence|arc|chapitre|scène|scene)\b/i;
 
-  // Champs existants non vides conservés (saisie manuelle), champs vides complétés, tableaux unis
+  // Fusion simple pour les éléments sans fiche (points à traiter, références) :
+  // champs existants non vides conservés, champs vides complétés, tableaux unis
   function mergeFields(existing, incoming) {
     const merged = { ...existing };
     for (const [field, value] of Object.entries(incoming)) {
@@ -39,8 +40,43 @@
     return merged;
   }
 
+  // Métadonnées de transport d'une extraction (origine, preuves par champ), jamais stockées telles quelles.
+  // `origin` et `_prov` reçus sont aussi écartés : une extraction ne peut pas se déclarer validée.
+  const stripMeta = (item) => {
+    const { _origin, _evidence, _prov, origin, ...rest } = item;
+    return rest;
+  };
+
+  // Fusion d'une fiche de la bible avec provenance : un champ vide est complété (à vérifier),
+  // une valeur différente devient une proposition (`reviews`), jamais un remplacement ni un cumul.
+  // Une extraction n'est jamais une saisie de l'auteur, quelle que soit l'étiquette reçue
+  const extractionOrigin = (origin) => (origin && origin !== 'auteur' ? origin : 'extraction');
+
+  function fieldMerger(collection, defaultOrigin, reviews) {
+    const originOf = (item) => extractionOrigin(item._origin || defaultOrigin);
+    const evidenceOf = (item) => (isObject(item._evidence) ? item._evidence : {});
+    const ctxOf = (item) => ({ collection, origin: originOf(item), evidence: evidenceOf(item), reviews });
+    const prefix = Schema.ID_PREFIXES[collection];
+    return {
+      // Nouvel élément : identifiant immédiat (une proposition du même lot peut le viser)
+      create(item) {
+        const entry = Provenance.initProv(stripMeta(item), originOf(item), evidenceOf(item));
+        return isEmpty(entry.id) ? { ...entry, id: Schema.newId(prefix) } : entry;
+      },
+      merge(existing, item) {
+        const ctx = ctxOf(item);
+        let entry = isEmpty(existing.id) ? { ...existing, id: Schema.newId(prefix) } : existing;
+        for (const [field, value] of Object.entries(stripMeta(item))) {
+          if (field === 'id') continue;
+          entry = Provenance.mergeField(entry, field, value, ctx);
+        }
+        return entry;
+      }
+    };
+  }
+
   // Fusion par clé exacte (nom complet normalisé) : "Jean Martin" ≠ "Jean Dupont"
-  function mergeByKey(existing, incoming, keyOf, mergeItem = mergeFields) {
+  function mergeByKey(existing, incoming, keyOf, mergeItem = mergeFields, createItem = stripMeta) {
     const list = [...(existing || [])];
     const index = new Map();
     list.forEach((item, i) => {
@@ -55,14 +91,14 @@
       if (!key) continue;
       if (index.has(key)) {
         const i = index.get(key);
-        const merged = mergeItem(list[i], item);
+        const merged = mergeItem(list[i], mergeItem === mergeFields ? stripMeta(item) : item);
         if (JSON.stringify(merged) !== JSON.stringify(list[i])) {
           list[i] = merged;
           updated++;
         }
       } else {
         index.set(key, list.length);
-        list.push(item);
+        list.push(createItem(item));
         added++;
       }
     }
@@ -129,14 +165,47 @@
     return { valid: true, error: null, updates };
   }
 
+  // Réunit l'analyse locale et la réponse de l'IA sans choisir de vérité par ordre d'arrivée :
+  // chaque élément garde son origine ; deux valeurs différentes pour une même fiche deviendront
+  // une proposition à examiner lors de l'application. Toutes les catégories sont conservées.
+  // Les pages du script viennent du parseur (texte réel) : une page résumée par l'IA ne les remplace pas.
+  const LIST_KEYS = ['character_updates', 'place_updates', 'system_updates', 'timeline_updates', 'todos', 'refs'];
+  function combineExtractions(local = {}, ai = {}) {
+    // L'origine « ia » est imposée : une réponse ne peut pas se déclarer saisie de l'auteur
+    const tag = (list, origin, force) => (Array.isArray(list) ? list : [])
+      .map(i => ({ ...i, _origin: force ? origin : (i._origin || origin) }));
+    const combined = {};
+    LIST_KEYS.forEach(k => { combined[k] = [...tag(local[k], 'parseur'), ...tag(ai[k], 'ia', true)]; });
+    const localPages = new Set((local.script_updates || []).map(p => String(p.page)));
+    const aiPages = (ai.script_updates || []).filter(p => !localPages.has(String(p.page)));
+    combined.script_updates = [...(local.script_updates || []), ...aiPages];
+    for (const k of ['sequences', 'worldContext', 'narrativeClues']) {
+      const value = local[k] !== undefined ? local[k] : ai[k];
+      if (value !== undefined) combined[k] = value;
+    }
+    const ignoredPages = (ai.script_updates || []).length - aiPages.length;
+    combined._notices = [
+      ...(local._notices || []),
+      ...(ignoredPages ? [`${ignoredPages} page(s) résumée(s) par l'IA non appliquée(s) : le texte du parseur fait foi.`] : [])
+    ];
+    return combined;
+  }
+
   // Applique des mises à jour à une copie du projet. Ne supprime jamais un élément existant.
-  function applyUpdates(projectData, updates) {
+  // options.origin : origine des éléments non étiquetés (parseur, ia, import…)
+  function applyUpdates(projectData, updates, options = {}) {
     const data = { ...projectData };
     COLLECTIONS.forEach(c => { data[c] = Array.isArray(data[c]) ? data[c] : []; });
     const summary = {};
+    const reviews = [];
+    const origin = options.origin || 'extraction';
     const record = (name, result) => {
       data[name] = result.list;
       if (result.added || result.updated) summary[name] = { added: result.added, updated: result.updated };
+    };
+    const mergeSheets = (collection, incoming, keyOf) => {
+      const merger = fieldMerger(collection, origin, reviews);
+      record(collection, mergeByKey(data[collection], incoming, keyOf, merger.merge, merger.create));
     };
 
     if (updates.script_updates?.length) {
@@ -149,17 +218,16 @@
     }
     if (updates.character_updates?.length) {
       const incoming = updates.character_updates.map(sanitizeCharacter).filter(Boolean);
-      record('characters', mergeByKey(data.characters, incoming, c => normalize(c.name)));
+      mergeSheets('characters', incoming, c => normalize(c.name));
     }
     if (updates.place_updates?.length) {
-      record('places', mergeByKey(data.places, updates.place_updates, p => normalize(p.name)));
+      mergeSheets('places', updates.place_updates, p => normalize(p.name));
     }
     if (updates.system_updates?.length) {
-      record('systems', mergeByKey(data.systems, updates.system_updates, s => normalize(s.name)));
+      mergeSheets('systems', updates.system_updates, s => normalize(s.name));
     }
     if (updates.timeline_updates?.length) {
-      record('timeline', mergeByKey(data.timeline, updates.timeline_updates,
-        t => `${normalize(t.period)}|${normalize(t.event)}`));
+      mergeSheets('timeline', updates.timeline_updates, t => `${normalize(t.period)}|${normalize(t.event)}`);
     }
     if (updates.todos?.length) {
       record('todos', mergeByKey(data.todos, updates.todos, t => normalize(t.title)));
@@ -171,6 +239,13 @@
     if (updates.worldContext) data.worldContext = updates.worldContext;
     if (updates.narrativeClues) data.narrativeClues = updates.narrativeClues;
 
+    // Désaccords avec les fiches existantes : propositions à examiner (jamais recréées une fois tranchées)
+    if (reviews.length) {
+      const result = Provenance.appendReviews(data.reviews, reviews);
+      data.reviews = result.list;
+      if (result.added) summary.reviews = { added: result.added, updated: 0 };
+    }
+
     // Les nouveaux éléments reçoivent un identifiant stable ; les existants gardent le leur
     // (copie des éléments sans id : le projet d'origine n'est jamais modifié)
     COLLECTIONS.forEach(c => {
@@ -180,5 +255,5 @@
     return { data, summary };
   }
 
-  return { applyUpdates, validateUpdates, rolesAsSuggestions, mergeByKey, mergeFields, normalize };
+  return { applyUpdates, validateUpdates, combineExtractions, rolesAsSuggestions, mergeByKey, mergeFields, normalize };
 });

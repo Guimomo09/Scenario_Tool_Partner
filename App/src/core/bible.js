@@ -7,11 +7,11 @@
 
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('./schema'));
+    module.exports = factory(require('./schema'), require('./provenance'));
   } else {
-    root.Bible = factory(root.ProjectSchema);
+    root.Bible = factory(root.ProjectSchema, root.Provenance);
   }
-})(typeof self !== 'undefined' ? self : this, function (Schema) {
+})(typeof self !== 'undefined' ? self : this, function (Schema, Provenance) {
 
   // type : text (une ligne), long (paragraphe), list (une valeur par ligne)
   const KINDS = {
@@ -19,6 +19,7 @@
       label: 'Personnages', singular: 'personnage', key: 'name',
       fields: [
         { key: 'name', label: 'Nom', type: 'text', required: true },
+        { key: 'aliases', label: 'Alias confirmés', type: 'list' },
         { key: 'role', label: 'Rôle', type: 'text' },
         { key: 'description', label: 'Description', type: 'long' },
         { key: 'traits', label: 'Traits', type: 'list' },
@@ -34,6 +35,7 @@
       label: 'Lieux', singular: 'lieu', key: 'name',
       fields: [
         { key: 'name', label: 'Nom', type: 'text', required: true },
+        { key: 'aliases', label: 'Autres noms', type: 'list' },
         { key: 'type', label: 'Type', type: 'text' },
         { key: 'description', label: 'Description', type: 'long' },
         { key: 'atmosphere', label: 'Atmosphère', type: 'long' },
@@ -146,7 +148,10 @@
     const list = [...listOf(data, kind)];
     const index = list.findIndex(e => isObject(e) && e.id === id);
     if (index < 0) return { data, entry: null, error: 'Fiche introuvable' };
-    const entry = { ...list[index], ...cleanFields(kind, fields || {}, list[index]), id };
+    const changes = cleanFields(kind, fields || {}, list[index]);
+    // Les champs modifiés deviennent des saisies de l'auteur (validées) ; les autres gardent leur provenance
+    const touched = Object.keys(changes).filter(k => JSON.stringify(changes[k]) !== JSON.stringify(list[index][k] ?? (Array.isArray(changes[k]) ? [] : '')));
+    const entry = Provenance.markAuthored({ ...list[index], ...changes, id }, touched);
     const missing = missingRequired(kind, entry);
     if (missing.length) return { data, entry: null, error: `Champ obligatoire : ${missing.join(', ')}` };
     const duplicate = findDuplicate(data, kind, entry, id);
@@ -188,7 +193,7 @@
     if (!isObject(entry)) return [];
     const known = new Set(KINDS[kind].fields.filter(f => isEditable(f, entry[f.key])).map(f => f.key));
     return Object.entries(entry)
-      .filter(([key, value]) => !known.has(key) && !META_FIELDS.has(key) &&
+      .filter(([key, value]) => !known.has(key) && !META_FIELDS.has(key) && !key.startsWith('_') &&
         value !== '' && value !== null && value !== undefined && !(Array.isArray(value) && !value.length));
   }
 

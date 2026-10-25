@@ -35,7 +35,8 @@ test('les champs manuels d\'un personnage sont conservés', () => {
   const lina = data.characters[0];
   assert.equal(lina.goal, 'Retrouver son frère');
   assert.equal(lina.role, 'Protagoniste'); // valeur existante non écrasée
-  assert.deepEqual(lina.traits, ['têtue', 'courageuse']);
+  // Un trait nouveau n'est plus cumulé en silence : il devient une proposition à examiner
+  assert.deepEqual(lina.traits, ['têtue']);
 });
 
 test('les homonymes partageant un prénom ne sont pas fusionnés', () => {

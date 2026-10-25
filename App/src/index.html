@@ -64,6 +64,7 @@
             <button class="workspace-tab active" role="tab" aria-selected="true" data-workspace="write" title="Écrire (Ctrl+Maj+1)"><span class="icon" data-icon="pen"></span>Écrire</button>
             <button class="workspace-tab" role="tab" aria-selected="false" data-workspace="structure" title="Structure (Ctrl+Maj+2)"><span class="icon" data-icon="scenes"></span>Structure</button>
             <button class="workspace-tab" role="tab" aria-selected="false" data-workspace="bible" title="Bible (Ctrl+Maj+3)"><span class="icon" data-icon="book"></span>Bible</button>
+            <button class="workspace-tab" role="tab" aria-selected="false" data-workspace="lecture" title="Lecture : ce que Partner comprend (Ctrl+Maj+4)"><span class="icon" data-icon="analyse"></span>Lecture</button>
           </div>
         </div>
         <div class="toolbar-group write-only">
@@ -128,6 +129,9 @@
 
       <!-- Bible -->
       <section class="workspace-panel workspace-view hidden" id="workspaceBible" role="tabpanel" aria-label="Bible"></section>
+
+      <!-- Lecture -->
+      <section class="workspace-panel workspace-view hidden" id="workspaceLecture" role="tabpanel" aria-label="Lecture"></section>
 
       <div class="editor-statusbar">
         <span id="saveStatus" role="status" aria-live="polite">Enregistré</span>
@@ -221,6 +225,7 @@
             <div class="shortcut"><kbd>Ctrl+Maj+1</kbd> Écrire</div>
             <div class="shortcut"><kbd>Ctrl+Maj+2</kbd> Structure</div>
             <div class="shortcut"><kbd>Ctrl+Maj+3</kbd> Bible</div>
+            <div class="shortcut"><kbd>Ctrl+Maj+4</kbd> Lecture</div>
           </div>
           <div class="shortcut-category">
             <h4>Partenaire</h4>
@@ -246,15 +251,21 @@
   <script src="components/icons.js"></script>
   <script src="core/schema.js"></script>
   <script src="core/manga-parser.js"></script>
+  <script src="core/provenance.js"></script>
   <script src="core/project-model.js"></script>
+  <script src="core/claims.js"></script>
+  <script src="core/understanding.js"></script>
   <script src="core/structure.js"></script>
   <script src="core/bible.js"></script>
+  <script src="core/critique.js"></script>
   <script src="core/partner-context.js"></script>
+  <script src="core/recall.js"></script>
   <script src="core/proposals.js"></script>
   <script src="core/partner-store.js"></script>
   <script src="components/partner-panel.js"></script>
   <script src="components/structure-view.js"></script>
   <script src="components/bible-view.js"></script>
+  <script src="components/understanding-view.js"></script>
   <script src="components/story-bible-import.js"></script>
   <script src="components/manga-analysis.js"></script>
   <script src="components/app.js"></script>

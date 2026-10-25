@@ -1,5 +1,5 @@
 // === Mémoire du partenaire par projet (_PARTNER.json) ===
-// Conversations, propositions, canon validé et dernier document ouvert.
+// Conversations, propositions, canon validé, décisions sur les remarques et dernier document ouvert.
 // Les champs inconnus sont conservés ; rien n'est supprimé sans action explicite de l'auteur.
 // Sans DOM : chargé dans le renderer via <script> et dans les tests via require().
 
@@ -33,7 +33,8 @@
       conversations: [conversation],
       activeConversationId: conversation.id,
       proposals: [],
-      canon: []
+      canon: [],
+      decisions: []
     };
   }
 
@@ -43,7 +44,7 @@
     if (typeof raw.version === 'number' && raw.version > STORE_VERSION) {
       return { error: `${FILE_NAME} vient d'une version plus récente de l'app (v${raw.version}).` };
     }
-    for (const key of ['conversations', 'proposals', 'canon']) {
+    for (const key of ['conversations', 'proposals', 'canon', 'decisions']) {
       if (key in raw && !Array.isArray(raw[key])) return { error: `${FILE_NAME} : « ${key} » n'est pas une liste.` };
     }
     const store = { ...raw, kind: 'partner', version: STORE_VERSION };
@@ -56,6 +57,7 @@
     }));
     store.proposals = (raw.proposals || []).filter(isObject);
     store.canon = (raw.canon || []).filter(isObject);
+    store.decisions = (raw.decisions || []).filter(d => isObject(d) && typeof d.text === 'string');
     if (!store.conversations.length) store.conversations.push(newConversation());
     if (!store.conversations.some(c => c.id === store.activeConversationId)) {
       store.activeConversationId = store.conversations[store.conversations.length - 1].id;
@@ -129,6 +131,30 @@
     return true;
   }
 
+  // Décision de l'auteur sur une remarque du partenaire : « retenue » (à traiter) ou « maintenu »
+  // (désaccord : le choix est gardé). Le texte du manuscrit n'est jamais modifié ici.
+  function addDecision(store, { remarkId, messageId = '', verdict, text }) {
+    if (!['retenu', 'maintenu'].includes(verdict)) return { ok: false, reason: 'Décision inconnue.' };
+    const clean = String(text || '').trim();
+    if (!clean || !remarkId) return { ok: false, reason: 'Remarque introuvable.' };
+    if (!Array.isArray(store.decisions)) store.decisions = [];
+    const existing = store.decisions.find(d => d.remarkId === remarkId);
+    if (existing) {
+      Object.assign(existing, { verdict, text: clean, decidedAt: new Date().toISOString() });
+      return { ok: true, decision: existing };
+    }
+    const decision = { id: newId('dc'), remarkId, messageId, verdict, text: clean, decidedAt: new Date().toISOString() };
+    store.decisions.push(decision);
+    return { ok: true, decision };
+  }
+
+  function removeDecision(store, id) {
+    const index = (store.decisions || []).findIndex(d => d.id === id);
+    if (index === -1) return false;
+    store.decisions.splice(index, 1);
+    return true;
+  }
+
   // Demandes en cours : une seule par conversation, rattachée à son projet.
   // Une réponse arrivée après annulation est ignorée ; après changement de projet,
   // elle est rangée dans le projet d'origine.
@@ -161,6 +187,6 @@
   return {
     FILE_NAME, STORE_VERSION, newId, createStore, normalizeStore, serialize,
     activeConversation, startConversation, addMessage, addProposals, findProposal,
-    setProposalStatus, addCanon, removeCanon, RequestTracker
+    setProposalStatus, addCanon, removeCanon, addDecision, removeDecision, RequestTracker
   };
 });

@@ -121,6 +121,7 @@ function getMenuTemplate() {
         { label: 'Écrire', accelerator: 'CmdOrCtrl+Shift+1', click: () => mainWindow.webContents.send('workspace', 'write') },
         { label: 'Structure', accelerator: 'CmdOrCtrl+Shift+2', click: () => mainWindow.webContents.send('workspace', 'structure') },
         { label: 'Bible', accelerator: 'CmdOrCtrl+Shift+3', click: () => mainWindow.webContents.send('workspace', 'bible') },
+        { label: 'Lecture', accelerator: 'CmdOrCtrl+Shift+4', click: () => mainWindow.webContents.send('workspace', 'lecture') },
         { type: 'separator' },
         { label: 'Mode Focus', accelerator: 'CmdOrCtrl+Shift+F', click: () => mainWindow.webContents.send('toggle-focus') },
         { label: 'Thème Sombre/Clair', accelerator: 'CmdOrCtrl+Shift+T', click: () => mainWindow.webContents.send('toggle-theme') },

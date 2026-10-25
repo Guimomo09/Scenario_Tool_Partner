@@ -19,7 +19,9 @@
     script: 'pg', sequences: 'sq', characters: 'ch', places: 'pl', systems: 'sy',
     timeline: 'tl', refs: 'rf', todos: 'td', arcs: 'ar',
     // Scènes (Structure) : ajoutées en v2 sans changement de version, une liste absente vaut vide
-    scenes: 'sc'
+    scenes: 'sc',
+    // Propositions à examiner (fusion des extractions, core/provenance.js) : liste absente = vide
+    reviews: 'rv'
   };
   const COLLECTIONS = Object.keys(ID_PREFIXES);
 

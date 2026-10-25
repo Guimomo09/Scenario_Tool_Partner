@@ -17,6 +17,9 @@ Projets/*
 Inbox/NOTES.md
 Inbox/*.txt
 
+# Sorties locales du protocole d'évaluation (réponses de modèles)
+App/eval/out/
+
 # Sauvegardes et écritures temporaires de l'app
 *.bak
 *.tmp-*
